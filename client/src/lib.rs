@@ -38,7 +38,7 @@ impl Holder {
     }
 
     /// Mention as a signer (owned public / owned private account).
-    fn signer(self, program: AccountId) -> AccountMention {
+    pub(crate) fn signer(self, program: AccountId) -> AccountMention {
         match self {
             Self::Public(id) => AccountIdentity::Public(id),
             Self::Private(id) => AccountIdentity::PrivateOwned(id),
@@ -147,12 +147,30 @@ impl Client {
 
     /// The program at `id`, checked against the bytecode we hold, for private txs.
     async fn program(&self, id: AccountId, elf: &'static [u8]) -> Result<ProgramWithDependencies> {
-        let program = Program::new(Cow::Borrowed(elf))?;
-        ensure!(
-            self.header(id).await?.image_id == program.id(),
-            "{id} runs different bytecode than this client's build"
-        );
-        Ok(ProgramWithDependencies::new(program, id, HashMap::new()))
+        self.program_with(id, elf, &[]).await
+    }
+
+    /// The program at `id` plus every program it may chain-call (`deps`: instance, bytecode), each
+    /// checked against the chain. A private tx proves all of them.
+    pub(crate) async fn program_with(
+        &self,
+        id: AccountId,
+        elf: &'static [u8],
+        deps: &[(AccountId, &'static [u8])],
+    ) -> Result<ProgramWithDependencies> {
+        let checked = async |id: AccountId, elf: &'static [u8]| -> Result<Program> {
+            let program = Program::new(Cow::Borrowed(elf))?;
+            ensure!(
+                self.header(id).await?.image_id == program.id(),
+                "{id} runs different bytecode than this client's build"
+            );
+            Ok(program)
+        };
+        let mut programs = HashMap::new();
+        for (dep, dep_elf) in deps {
+            programs.insert(*dep, checked(*dep, dep_elf).await?);
+        }
+        Ok(ProgramWithDependencies::new(checked(id, elf).await?, id, programs))
     }
 
     // ---- token ----------------------------------------------------------------------------

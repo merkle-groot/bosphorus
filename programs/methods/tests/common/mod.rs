@@ -1,6 +1,9 @@
 //! In-process chain for the essential tests: a `V03State`, real guests, signed public txs.
 
-#![allow(dead_code, reason = "each test binary uses a different subset")]
+#![allow(dead_code, unused_imports, reason = "each test binary uses a different subset")]
+
+pub mod private;
+pub mod world;
 
 use std::borrow::Cow;
 
@@ -17,6 +20,7 @@ use lee_core::{
 };
 use program_loader_core::Instruction as LoaderInstruction;
 
+#[derive(Clone)]
 pub struct Chain {
     pub state: V03State,
     /// Block timestamp (ms) for the next tx.
@@ -106,6 +110,12 @@ impl Chain {
         drop(self.state.apply_state_diff(diff));
         self.block += 1;
         Ok(charge.cycles)
+    }
+
+    /// The block id for the next tx.
+    pub fn next_block(&mut self) -> u64 {
+        self.block += 1;
+        self.block - 1
     }
 
     pub fn shard(&self, account: AccountId, program: AccountId) -> Vec<u8> {

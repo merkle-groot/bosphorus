@@ -1,9 +1,13 @@
-//! Lending: state readers, the claim builder and tx builders (plan 2.3). Public owners only;
-//! private owners are Phase 4.
+//! Lending: state readers, the claim builder and tx builders (plan 2.3, 4.1–4.2).
 //!
 //! Every op reads the market (and feed) first, builds its claims, and after inclusion checks that
 //! the position moved by exactly what `plan` derives from those claims. A failed public tx still
 //! lands and pays (constraints §5), so that check is how a failure shows up.
+//!
+//! **Private mode:** an op whose owner or payer is a `Private/` account goes out as a
+//! privacy-preserving tx, proven here (constraints §7). Its position is salted
+//! ([`Client::owner`]), its claims are sized for the proving delay ([`ClaimConfig::private`]), and
+//! payouts go to the owner's own private account unless told otherwise.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -11,17 +15,19 @@ use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use bosphorus_core::{WAD, claims, irm, position};
 pub use bosphorus_lending::{
     Claimed, Config as LendingConfig, HealthClaim, Instruction, Interval, IrmParams, Liquidation, LiquidationAmount,
-    Market, MarketAccounts, MarketId, MarketParams, Position, Shard, Window,
+    Market, MarketAccounts, MarketId, MarketParams, Position, Salt, Shard, Window,
 };
 use bosphorus_lending::{config_id, position_id};
 use common::transaction::LeeTransaction;
-use lee::{AccountId, ProgramShardSelector};
+use hmac::{Hmac, Mac as _};
+use lee::{AccountId, ProgramShardSelector, program::Program};
+use lee_core::native_token::NATIVE_TOKEN_PROGRAM_ID;
 use sequencer_service_rpc::RpcClient as _;
-use wallet::{AccountIdentity, AccountMention};
+use wallet::{AccDecodeData, AccountIdentity, AccountMention};
 
-use crate::{Client, Feed, U256};
+use crate::{Client, Feed, Holder, LENDING_ELF, TOKEN_ELF, U256};
 
-pub const PUBLIC_SALT: [u8; 32] = [0; 32];
+pub const PUBLIC_SALT: Salt = [0; 32];
 
 fn sign(id: AccountId, program: AccountId) -> AccountMention {
     AccountIdentity::Public(id).select_program_shard(program)
@@ -29,6 +35,63 @@ fn sign(id: AccountId, program: AccountId) -> AccountMention {
 
 fn read(id: AccountId, program: AccountId) -> AccountMention {
     AccountIdentity::PublicNoSign(id).select_program_shard(program)
+}
+
+/// A tx's accounts in layout order, remembering which are private (their notes get decoded).
+#[derive(Default)]
+struct Accounts {
+    mentions: Vec<AccountMention>,
+    private: Vec<AccountId>,
+}
+
+impl Accounts {
+    /// An authorising account: a signing public account or an owned private one (with `ask`).
+    fn signer(&mut self, holder: Holder, program: AccountId) -> &mut Self {
+        if let Holder::Private(id) = holder {
+            self.private.push(id);
+        }
+        self.mentions.push(holder.signer(program));
+        self
+    }
+
+    fn read(&mut self, id: AccountId, program: AccountId) -> &mut Self {
+        self.mentions.push(read(id, program));
+        self
+    }
+
+    /// A payout account other than `owner` (public, or one of this wallet's private accounts).
+    fn payout(&mut self, to: Option<Holder>, owner: Holder, program: AccountId) -> &mut Self {
+        match to.filter(|to| to.id() != owner.id()) {
+            Some(Holder::Public(id)) => self.read(id, program),
+            Some(to @ Holder::Private(_)) => self.signer(to, program),
+            None => self,
+        }
+    }
+}
+
+/// A position's owner: a wallet account plus the salt that, with it, derives the position
+/// (design §4). Public owners use the zero salt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Owner {
+    pub holder: Holder,
+    pub salt: Salt,
+}
+
+impl Owner {
+    pub fn public(id: AccountId) -> Self {
+        Self { holder: Holder::Public(id), salt: PUBLIC_SALT }
+    }
+}
+
+/// `HMAC-SHA256(secret, "/bosphorus/v1/position-salt/" ‖ market_id ‖ owner ‖ index)`: unlinkable
+/// salts that only the owner's keys can recompute, so positions are recoverable (design §4).
+pub fn position_salt(secret: &[u8; 32], market: &MarketId, owner: &AccountId, index: u32) -> Salt {
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret).expect("HMAC takes any key length");
+    mac.update(b"/bosphorus/v1/position-salt/");
+    mac.update(market);
+    mac.update(owner.as_ref());
+    mac.update(&index.to_le_bytes());
+    mac.finalize().into_bytes().into()
 }
 
 /// How a client turns state it has read into claims (E7 tunes these).
@@ -45,11 +108,31 @@ pub struct ClaimConfig {
     pub ratio_width: u128,
     /// The price claim's `lo` is this fraction (WAD) below the feed price.
     pub price_width: u128,
+    /// `t` is rounded down to a multiple of this (1 = exact). Private txs publish their window, so
+    /// an exact `t` would timestamp when proving began (P4-privacy-observed, leak 2).
+    pub t_grid_ms: u64,
+}
+
+impl ClaimConfig {
+    /// For private txs: valid for 20 min and room for 20 min of accrual by others (S4: proving
+    /// takes ~10 min on an M1), a ratio width that covers the rate moving while proving, and a
+    /// price claim 2% below the feed (the health check uses it). E7: under a 10-minute delay,
+    /// `ahead` short of it never lands; ratio width 1e-9 lands 60%, 1e-8 97%, 1e-7 100%.
+    pub fn private() -> Self {
+        Self {
+            window_ms: 20 * 60_000,
+            ahead_ms: 20 * 60_000,
+            ratio_width: WAD / 10_000_000,
+            price_width: WAD / 50,
+            t_grid_ms: 60_000,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for ClaimConfig {
     fn default() -> Self {
-        Self { window_ms: 120_000, lag_ms: 2_000, ahead_ms: 30_000, ratio_width: WAD / 1_000_000_000, price_width: WAD / 200 }
+        Self { window_ms: 120_000, lag_ms: 2_000, ahead_ms: 30_000, ratio_width: WAD / 1_000_000_000, price_width: WAD / 200, t_grid_ms: 1 }
     }
 }
 
@@ -65,7 +148,9 @@ pub struct Claims {
 impl ClaimConfig {
     pub fn claims(&self, market: &Market, now_ms: u64) -> Result<Claims> {
         let t = now_ms.saturating_sub(self.lag_ms);
-        let ahead = self.lag_ms + self.ahead_ms;
+        let t = t - t % self.t_grid_ms.max(1);
+        // Ratios may have accrued up to `now` (rounding moved `t` back) and `ahead` beyond.
+        let ahead = (now_ms - t) + self.ahead_ms;
         let (rs, rb) = claims::ratio_claims(&market.state, &market.params.irm, t, ahead, self.ratio_width)?;
         Ok(Claims { window: Window { t, w: self.window_ms }, rs, rb })
     }
@@ -93,6 +178,22 @@ impl On {
     /// A public owner's position (zero salt).
     pub fn position_of(&self, owner: AccountId) -> AccountId {
         position_id(&self.lending, &self.market, &owner, &PUBLIC_SALT)
+    }
+
+    pub fn position(&self, owner: &Owner) -> AccountId {
+        position_id(&self.lending, &self.market, &owner.holder.id(), &owner.salt)
+    }
+}
+
+/// A zero amount fails in `plan`, and a zero delta would pass the post-tx checks.
+fn zero_amount(ix: &Instruction) -> bool {
+    match ix {
+        Instruction::Supply { assets, .. }
+        | Instruction::SupplyCollateral { assets, .. }
+        | Instruction::WithdrawCollateral { assets, .. }
+        | Instruction::Borrow { assets, .. } => *assets == 0,
+        Instruction::Withdraw { shares, .. } | Instruction::Repay { shares, .. } => *shares == 0,
+        _ => false,
     }
 }
 
@@ -208,17 +309,77 @@ impl Client {
     }
 
     async fn send_lending(&self, lending: AccountId, accounts: Vec<AccountMention>, ix: Instruction, payer: Option<AccountId>) -> Result<()> {
-        // A zero amount fails in `plan`, and a zero delta would pass the post-tx checks.
-        let zero = match &ix {
-            Instruction::Supply { assets, .. }
-            | Instruction::SupplyCollateral { assets, .. }
-            | Instruction::WithdrawCollateral { assets, .. }
-            | Instruction::Borrow { assets, .. } => *assets == 0,
-            Instruction::Withdraw { shares, .. } | Instruction::Repay { shares, .. } => *shares == 0,
-            _ => false,
-        };
-        ensure!(!zero, "zero amount");
+        ensure!(!zero_amount(&ix), "zero amount");
         self.send_public(lending, accounts, ix, payer).await
+    }
+
+    /// Sends a public tx, or a private one if any account is private (proven here; fee-exempt).
+    async fn send_op(&mut self, lending: AccountId, params: &MarketParams, accounts: Accounts, ix: Instruction, payer: Option<AccountId>) -> Result<()> {
+        if accounts.private.is_empty() {
+            return self.send_lending(lending, accounts.mentions, ix, payer).await;
+        }
+        ensure!(!zero_amount(&ix), "zero amount");
+        let mut deps = vec![];
+        for asset in [params.loan_asset, params.collateral_asset] {
+            if asset != NATIVE_TOKEN_PROGRAM_ID && !deps.iter().any(|(id, _)| *id == asset) {
+                deps.push((asset, TOKEN_ELF));
+            }
+        }
+        let program = self.program_with(lending, LENDING_ELF, &deps).await?;
+        let data = Program::serialize_instruction(ix)?;
+        let started = std::time::Instant::now();
+        let (hash, secrets) = self
+            .wallet
+            .send_privacy_preserving_tx(accounts.mentions, data, &program)
+            .await
+            .map_err(|e| anyhow!("{e:?}"))?;
+        eprintln!("private tx {hash} proved and sent in {:.1?}", started.elapsed());
+        let (tx, block) = self.wallet.poll_transaction(hash).await.context("private tx not included (a claim failed at settlement?)")?;
+        eprintln!("tx {hash} included in block {block}");
+        let LeeTransaction::PrivacyPreserving(tx) = tx else { bail!("expected a private tx") };
+        ensure!(secrets.len() == accounts.private.len(), "{} shared secrets for {} private accounts", secrets.len(), accounts.private.len());
+        let decode: Vec<_> = secrets.into_iter().zip(accounts.private).map(|(secret, id)| AccDecodeData::Decode(secret, id)).collect();
+        self.wallet.decode_insert_privacy_preserving_transaction_results(&tx, &decode)?;
+        self.wallet.store_persistent_data()?;
+        Ok(())
+    }
+
+    /// `holder`'s position number `index` in a market. Private owners get a derived salt; public
+    /// owners have only index 0 (zero salt).
+    pub fn owner(&self, holder: Holder, market: &MarketId, index: u32) -> Result<Owner> {
+        match holder {
+            Holder::Public(id) => {
+                ensure!(index == 0, "public owners have one position per market (index 0)");
+                Ok(Owner::public(id))
+            }
+            Holder::Private(id) => {
+                let found = self
+                    .wallet
+                    .storage()
+                    .key_chain()
+                    .private_account(id)
+                    .with_context(|| format!("{id} isn't a private account in this wallet"))?;
+                let secret = found.key_chain.secret_spending_key.0;
+                Ok(Owner { holder, salt: position_salt(&secret, market, &id, index) })
+            }
+        }
+    }
+
+    /// Recovery (design §4): `holder`'s positions in a market, walking indices until one is unused.
+    pub async fn owned_positions(&self, lending: AccountId, market: &MarketId, holder: Holder) -> Result<Vec<(u32, AccountId, Position)>> {
+        let mut found = vec![];
+        for index in 0.. {
+            let owner = self.owner(holder, market, index)?;
+            let id = position_id(&lending, market, &holder.id(), &owner.salt);
+            match self.position(lending, id).await? {
+                Some(p) => found.push((index, id, p)),
+                None => break,
+            }
+            if matches!(holder, Holder::Public(_)) {
+                break;
+            }
+        }
+        Ok(found)
     }
 
     // ---- admin ----------------------------------------------------------------------------
@@ -263,73 +424,73 @@ impl Client {
     }
 
     /// Supplies `assets` from `from` to `position`. Returns the shares minted.
-    pub async fn supply(&self, on: &On, from: AccountId, position: AccountId, assets: u128) -> Result<u128> {
+    pub async fn supply(&mut self, on: &On, from: Holder, position: AccountId, assets: u128) -> Result<u128> {
         let (lending, market) = (on.lending, self.market(on.lending, &on.market).await?);
         let c = on.claims.claims(&market, now_ms()?)?;
         let rs = Interval { lo: 0, hi: c.rs.hi };
         let shares = claims::supply_shares(assets, &rs)?;
         let (m, loan) = (on.accounts(), market.params.loan_asset);
-        let accounts = vec![read(m.market, lending), read(position, lending), sign(from, loan), read(m.loan_vault, loan)];
+        let mut accounts = Accounts::default();
+        accounts.read(m.market, lending).read(position, lending).signer(from, loan).read(m.loan_vault, loan);
         let before = self.position_or_default(lending, position).await?;
-        let ix = Instruction::Supply { params: market.params, assets, rs, window: c.window };
-        self.send_lending(lending, accounts, ix, on.payer).await?;
+        let ix = Instruction::Supply { params: market.params.clone(), assets, rs, window: c.window };
+        self.send_op(lending, &market.params, accounts, ix, on.payer).await?;
         let after = self.position_or_default(lending, position).await?;
         ensure!(after.supply_shares == before.supply_shares + shares, "supply didn't apply");
         Ok(shares)
     }
 
     /// Withdraws `shares` of `owner`'s supply to `to` (default: the owner). Returns the assets.
-    pub async fn withdraw(&self, on: &On, owner: AccountId, shares: u128, to: Option<AccountId>) -> Result<u128> {
+    pub async fn withdraw(&mut self, on: &On, owner: &Owner, shares: u128, to: Option<Holder>) -> Result<u128> {
         let (lending, market) = (on.lending, self.market(on.lending, &on.market).await?);
         let c = on.claims.claims(&market, now_ms()?)?;
         let rs = Interval { lo: c.rs.lo, hi: u128::MAX };
         let assets = claims::withdraw_assets(shares, &rs)?;
-        let (m, loan, position) = (on.accounts(), market.params.loan_asset, on.position_of(owner));
-        let mut accounts = vec![sign(owner, loan), read(m.market, lending), read(position, lending), read(m.loan_vault, loan)];
-        accounts.extend(to.filter(|to| *to != owner).map(|to| read(to, loan)));
+        let (m, loan, position) = (on.accounts(), market.params.loan_asset, on.position(owner));
+        let mut accounts = Accounts::default();
+        accounts.signer(owner.holder, loan).read(m.market, lending).read(position, lending).read(m.loan_vault, loan);
+        accounts.payout(to, owner.holder, loan);
         let before = self.position_or_default(lending, position).await?;
-        let ix = Instruction::Withdraw { params: market.params, shares, salt: PUBLIC_SALT, rs, window: c.window };
-        self.send_lending(lending, accounts, ix, on.payer).await?;
+        let ix = Instruction::Withdraw { params: market.params.clone(), shares, salt: owner.salt, rs, window: c.window };
+        self.send_op(lending, &market.params, accounts, ix, on.payer).await?;
         let after = self.position_or_default(lending, position).await?;
         ensure!(after.supply_shares + shares == before.supply_shares, "withdraw didn't apply (liquidity? shares?)");
         Ok(assets)
     }
 
-    pub async fn supply_collateral(&self, on: &On, from: AccountId, position: AccountId, assets: u128) -> Result<()> {
+    pub async fn supply_collateral(&mut self, on: &On, from: Holder, position: AccountId, assets: u128) -> Result<()> {
         // The market isn't touched by this op, so check it exists here.
         let (lending, market) = (on.lending, self.market(on.lending, &on.market).await?);
         let (m, coll) = (on.accounts(), market.params.collateral_asset);
-        let accounts = vec![read(position, lending), sign(from, coll), read(m.collateral_vault, coll)];
+        let mut accounts = Accounts::default();
+        accounts.read(position, lending).signer(from, coll).read(m.collateral_vault, coll);
         let before = self.position_or_default(lending, position).await?;
-        self.send_lending(lending, accounts, Instruction::SupplyCollateral { params: market.params, assets }, on.payer).await?;
+        let ix = Instruction::SupplyCollateral { params: market.params.clone(), assets };
+        self.send_op(lending, &market.params, accounts, ix, on.payer).await?;
         let after = self.position_or_default(lending, position).await?;
         ensure!(after.collateral == before.collateral + assets, "supply_collateral didn't apply");
         Ok(())
     }
 
     /// Without debt this skips the oracle and the market (so it works with a stale feed).
-    pub async fn withdraw_collateral(&self, on: &On, owner: AccountId, assets: u128, to: Option<AccountId>) -> Result<()> {
+    pub async fn withdraw_collateral(&mut self, on: &On, owner: &Owner, assets: u128, to: Option<Holder>) -> Result<()> {
         let (lending, market) = (on.lending, self.market(on.lending, &on.market).await?);
-        let (m, coll, position) = (on.accounts(), market.params.collateral_asset, on.position_of(owner));
+        let (m, coll, position) = (on.accounts(), market.params.collateral_asset, on.position(owner));
         let before = self.position_or_default(lending, position).await?;
-        let mut accounts = vec![sign(owner, coll)];
+        let mut accounts = Accounts::default();
+        accounts.signer(owner.holder, coll);
         let health = if before.borrow_shares == 0 {
-            accounts.push(read(position, lending));
+            accounts.read(position, lending);
             None
         } else {
             let c = on.claims.claims(&market, now_ms()?)?;
             let feed = self.feed(market.params.oracle_feed, market.params.oracle_program).await?;
-            accounts.extend([
-                read(m.market, lending),
-                read(position, lending),
-                read(market.params.oracle_feed, market.params.oracle_program),
-            ]);
+            accounts.read(m.market, lending).read(position, lending).read(market.params.oracle_feed, market.params.oracle_program);
             Some(HealthClaim { price: on.claims.price(&feed)?, rb: Interval { lo: 0, hi: c.rb.hi }, window: c.window })
         };
-        accounts.push(read(m.collateral_vault, coll));
-        accounts.extend(to.filter(|to| *to != owner).map(|to| read(to, coll)));
-        let ix = Instruction::WithdrawCollateral { params: market.params, assets, salt: PUBLIC_SALT, health };
-        self.send_lending(lending, accounts, ix, on.payer).await?;
+        accounts.read(m.collateral_vault, coll).payout(to, owner.holder, coll);
+        let ix = Instruction::WithdrawCollateral { params: market.params.clone(), assets, salt: owner.salt, health };
+        self.send_op(lending, &market.params, accounts, ix, on.payer).await?;
         let after = self.position_or_default(lending, position).await?;
         ensure!(after.collateral + assets == before.collateral, "withdraw_collateral didn't apply (health? price?)");
         Ok(())
@@ -337,40 +498,41 @@ impl Client {
 
     /// Borrows `assets` against `owner`'s position, paid to `to` (default: the owner). Returns the
     /// debt shares.
-    pub async fn borrow(&self, on: &On, owner: AccountId, assets: u128, to: Option<AccountId>) -> Result<u128> {
+    pub async fn borrow(&mut self, on: &On, owner: &Owner, assets: u128, to: Option<Holder>) -> Result<u128> {
         let (lending, market) = (on.lending, self.market(on.lending, &on.market).await?);
         let feed = self.feed(market.params.oracle_feed, market.params.oracle_program).await?;
         let c = on.claims.claims(&market, now_ms()?)?;
         let health = HealthClaim { price: on.claims.price(&feed)?, rb: c.rb, window: c.window };
         let shares = claims::borrow_shares(assets, &c.rb)?;
-        let (m, loan, position) = (on.accounts(), market.params.loan_asset, on.position_of(owner));
-        let mut accounts = vec![
-            sign(owner, loan),
-            read(m.market, lending),
-            read(position, lending),
-            read(market.params.oracle_feed, market.params.oracle_program),
-            read(m.loan_vault, loan),
-        ];
-        accounts.extend(to.filter(|to| *to != owner).map(|to| read(to, loan)));
+        let (m, loan, position) = (on.accounts(), market.params.loan_asset, on.position(owner));
+        let mut accounts = Accounts::default();
+        accounts
+            .signer(owner.holder, loan)
+            .read(m.market, lending)
+            .read(position, lending)
+            .read(market.params.oracle_feed, market.params.oracle_program)
+            .read(m.loan_vault, loan)
+            .payout(to, owner.holder, loan);
         let before = self.position_or_default(lending, position).await?;
-        let ix = Instruction::Borrow { params: market.params, assets, salt: PUBLIC_SALT, health };
-        self.send_lending(lending, accounts, ix, on.payer).await?;
+        let ix = Instruction::Borrow { params: market.params.clone(), assets, salt: owner.salt, health };
+        self.send_op(lending, &market.params, accounts, ix, on.payer).await?;
         let after = self.position_or_default(lending, position).await?;
         ensure!(after.borrow_shares == before.borrow_shares + shares, "borrow didn't apply (health? liquidity? price fresh?)");
         Ok(shares)
     }
 
     /// Repays `shares` of `position`'s debt from `from`. Returns the assets paid.
-    pub async fn repay(&self, on: &On, from: AccountId, position: AccountId, shares: u128) -> Result<u128> {
+    pub async fn repay(&mut self, on: &On, from: Holder, position: AccountId, shares: u128) -> Result<u128> {
         let (lending, market) = (on.lending, self.market(on.lending, &on.market).await?);
         let c = on.claims.claims(&market, now_ms()?)?;
         let rb = Interval { lo: 0, hi: c.rb.hi };
         let assets = claims::repay_assets(shares, &rb)?;
         let (m, loan) = (on.accounts(), market.params.loan_asset);
-        let accounts = vec![read(m.market, lending), read(position, lending), sign(from, loan), read(m.loan_vault, loan)];
+        let mut accounts = Accounts::default();
+        accounts.read(m.market, lending).read(position, lending).signer(from, loan).read(m.loan_vault, loan);
         let before = self.position_or_default(lending, position).await?;
-        let ix = Instruction::Repay { params: market.params, shares, rb, window: c.window };
-        self.send_lending(lending, accounts, ix, on.payer).await?;
+        let ix = Instruction::Repay { params: market.params.clone(), shares, rb, window: c.window };
+        self.send_op(lending, &market.params, accounts, ix, on.payer).await?;
         let after = self.position_or_default(lending, position).await?;
         ensure!(after.borrow_shares + shares == before.borrow_shares, "repay didn't apply");
         Ok(assets)

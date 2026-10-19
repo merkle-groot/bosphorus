@@ -19,3 +19,5 @@ sequencer_service_rpc.workspace = true
 bosphorus-methods.workspace = true
 anyhow.workspace = true
 borsh.workspace = true
+hmac = "0.12"
+sha2.workspace = true

@@ -1131,10 +1131,15 @@ name = "bosphorus-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "borsh",
  "bosphorus-client",
  "bosphorus-core",
+ "bosphorus-lending",
+ "bosphorus-token",
  "clap",
+ "common",
  "lee",
+ "lee_core",
  "tokio",
 ]
 
@@ -1150,10 +1155,12 @@ dependencies = [
  "bosphorus-oracle",
  "bosphorus-token",
  "common",
+ "hmac 0.12.1",
  "lee",
  "lee_core",
  "program_loader_core",
  "sequencer_service_rpc",
+ "sha2 0.10.9",
  "wallet",
 ]
 

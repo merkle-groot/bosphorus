@@ -48,30 +48,38 @@ impl Irm {
 
 #[derive(Args, Clone)]
 pub struct ClaimArgs {
-    /// Validity window of the tx, seconds.
-    #[arg(long, default_value_t = 120)]
-    window: u64,
-    /// How far ahead (seconds) ratio claims allow other txs to accrue the market before ours lands.
-    #[arg(long, default_value_t = 30)]
-    ahead: u64,
-    /// Widening of ratio claims (fraction).
-    #[arg(long, default_value = "0.000000001", value_parser = wad)]
-    ratio_width: u128,
-    /// How far below the feed price the health check's price claim goes (fraction).
-    #[arg(long, default_value = "0.5%", value_parser = wad)]
-    price_width: u128,
+    /// Validity window of the tx, seconds [default: 120 public, 1200 private].
+    #[arg(long)]
+    window: Option<u64>,
+    /// How far ahead (seconds) ratio claims allow other txs to accrue the market before ours lands
+    /// [default: 30 public, 1200 private].
+    #[arg(long)]
+    ahead: Option<u64>,
+    /// Widening of ratio claims (fraction) [default: 0.000000001].
+    #[arg(long, value_parser = wad)]
+    ratio_width: Option<u128>,
+    /// How far below the feed price the health check's price claim goes (fraction)
+    /// [default: 0.5% public, 2% private].
+    #[arg(long, value_parser = wad)]
+    price_width: Option<u128>,
 }
 
 impl ClaimArgs {
-    fn config(&self) -> ClaimConfig {
+    /// Defaults sized for a public tx, or for a private one's proving delay.
+    fn config(&self, private: bool) -> ClaimConfig {
+        let base = if private { ClaimConfig::private() } else { ClaimConfig::default() };
         ClaimConfig {
-            window_ms: self.window * 1000,
-            ahead_ms: self.ahead * 1000,
-            ratio_width: self.ratio_width,
-            price_width: self.price_width,
-            ..ClaimConfig::default()
+            window_ms: self.window.map_or(base.window_ms, |w| w * 1000),
+            ahead_ms: self.ahead.map_or(base.ahead_ms, |a| a * 1000),
+            ratio_width: self.ratio_width.unwrap_or(base.ratio_width),
+            price_width: self.price_width.unwrap_or(base.price_width),
+            ..base
         }
     }
+}
+
+fn private(holders: &[Option<Holder>]) -> bool {
+    holders.iter().flatten().any(|h| matches!(h, Holder::Private(_)))
 }
 
 #[derive(Subcommand)]
@@ -200,6 +208,9 @@ pub enum MarketCmd {
         from: Holder,
         #[arg(long)]
         owner: Option<Holder>,
+        /// Which of a private owner's positions in this market (salt index).
+        #[arg(long, default_value_t = 0)]
+        index: u32,
         #[arg(long)]
         assets: u128,
         #[command(flatten)]
@@ -211,6 +222,8 @@ pub enum MarketCmd {
         on: MarketArgs,
         #[arg(long)]
         owner: Holder,
+        #[arg(long, default_value_t = 0)]
+        index: u32,
         #[arg(long, required_unless_present = "all")]
         shares: Option<u128>,
         #[arg(long)]
@@ -227,6 +240,9 @@ pub enum MarketCmd {
         from: Holder,
         #[arg(long)]
         owner: Option<Holder>,
+        /// Which of a private owner's positions in this market (salt index).
+        #[arg(long, default_value_t = 0)]
+        index: u32,
         #[arg(long)]
         assets: u128,
     },
@@ -235,6 +251,8 @@ pub enum MarketCmd {
         on: MarketArgs,
         #[arg(long)]
         owner: Holder,
+        #[arg(long, default_value_t = 0)]
+        index: u32,
         #[arg(long, required_unless_present = "all")]
         assets: Option<u128>,
         #[arg(long)]
@@ -250,6 +268,8 @@ pub enum MarketCmd {
         on: MarketArgs,
         #[arg(long)]
         owner: Holder,
+        #[arg(long, default_value_t = 0)]
+        index: u32,
         #[arg(long)]
         assets: u128,
         #[arg(long)]
@@ -265,6 +285,8 @@ pub enum MarketCmd {
         from: Holder,
         #[arg(long)]
         owner: Option<Holder>,
+        #[arg(long, default_value_t = 0)]
+        index: u32,
         #[arg(long, required_unless_present = "all")]
         shares: Option<u128>,
         #[arg(long)]
@@ -272,14 +294,15 @@ pub enum MarketCmd {
         #[command(flatten)]
         claims: ClaimArgs,
     },
-    /// Liquidate `owner`'s position in full if it's unhealthy. Prints "repaid seized bad_shares".
+    /// Liquidate a position in full if it's unhealthy. Prints "repaid seized bad_shares".
     Liquidate {
         #[command(flatten)]
         on: MarketArgs,
         #[arg(long)]
         liquidator: Holder,
+        /// The position account (`bos market positions` lists them).
         #[arg(long)]
-        owner: Holder,
+        position: Holder,
         #[arg(long)]
         to: Option<Holder>,
         #[command(flatten)]
@@ -290,10 +313,15 @@ pub enum MarketCmd {
         #[command(flatten)]
         on: MarketArgs,
     },
-    /// Positions under a lending program (scans blocks), with their market.
+    /// Positions under a lending program (scans blocks), with their market. With `--market` and
+    /// `--owner`: that owner's positions, recovered by salt index.
     Positions {
         #[arg(long)]
         lending: Holder,
+        #[arg(long, value_parser = parse_market_id, requires = "owner")]
+        market: Option<MarketId>,
+        #[arg(long, requires = "market")]
+        owner: Option<Holder>,
     },
 }
 
@@ -305,6 +333,8 @@ pub struct Status {
     market: MarketId,
     #[arg(long)]
     owner: Option<Holder>,
+    #[arg(long, default_value_t = 0)]
+    index: u32,
 }
 
 fn payer(p: Option<Holder>) -> Option<lee::AccountId> {
@@ -342,7 +372,7 @@ pub async fn admin(client: &Client, cmd: Admin) -> Result<()> {
             println!("fee recipient {}", config.fee_recipient);
         }
         Admin::SetFee { lending, admin, market, fee, claims, payer: p } => {
-            let on = On { lending: lending.id(), market, claims: claims.config(), payer: payer(p) };
+            let on = On { lending: lending.id(), market, claims: claims.config(false), payer: payer(p) };
             client.set_fee(&on, public(admin)?, fee).await?;
             println!("fee {}", format_wad(fee, 4));
         }
@@ -366,7 +396,7 @@ fn describe_irm(irm: &IrmParams) -> String {
     format!("linear-kink base {} slope1 {} slope2 {} kink {} (APR)", apr(base), apr(slope1), apr(slope2), format_wad(u_opt, 4))
 }
 
-pub async fn market(client: &Client, cmd: MarketCmd) -> Result<()> {
+pub async fn market(client: &mut Client, cmd: MarketCmd) -> Result<()> {
     match cmd {
         MarketCmd::Create { lending, loan, collateral, oracle, feed, lltv, irm, max_price_age, payer } => {
             let params = MarketParams {
@@ -395,58 +425,68 @@ pub async fn market(client: &Client, cmd: MarketCmd) -> Result<()> {
                 );
             }
         }
-        MarketCmd::Supply { on, from, owner, assets, claims } => {
-            let (on, from) = (on.on(claims.config()), public(from)?);
-            let position = on.position_of(owner.map(public).transpose()?.unwrap_or(from));
-            println!("{}", client.supply(&on, from, position, assets).await?);
+        MarketCmd::Supply { on, from, owner, index, assets, claims } => {
+            let on = on.on(claims.config(private(&[Some(from), owner])));
+            let owner = client.owner(owner.unwrap_or(from), &on.market, index)?;
+            println!("{}", client.supply(&on, from, on.position(&owner), assets).await?);
         }
-        MarketCmd::Withdraw { on, owner, shares, all, to, claims } => {
-            let (on, owner) = (on.on(claims.config()), public(owner)?);
+        MarketCmd::Withdraw { on, owner, index, shares, all, to, claims } => {
+            let on = on.on(claims.config(private(&[Some(owner), to])));
+            let owner = client.owner(owner, &on.market, index)?;
             let shares = match shares {
                 Some(shares) if !all => shares,
-                _ => client.position_shares(on.lending, on.position_of(owner)).await?.supply_shares,
+                _ => client.position_shares(on.lending, on.position(&owner)).await?.supply_shares,
             };
-            println!("{}", client.withdraw(&on, owner, shares, to.map(public).transpose()?).await?);
+            println!("{}", client.withdraw(&on, &owner, shares, to).await?);
         }
-        MarketCmd::SupplyCollateral { on, from, owner, assets } => {
-            let (on, from) = (on.on(ClaimConfig::default()), public(from)?);
-            let position = on.position_of(owner.map(public).transpose()?.unwrap_or(from));
+        MarketCmd::SupplyCollateral { on, from, owner, index, assets } => {
+            let on = on.on(ClaimConfig::default());
+            let owner = client.owner(owner.unwrap_or(from), &on.market, index)?;
+            let position = on.position(&owner);
             client.supply_collateral(&on, from, position, assets).await?;
             println!("{}", client.position_shares(on.lending, position).await?.collateral);
         }
-        MarketCmd::WithdrawCollateral { on, owner, assets, all, to, claims } => {
-            let (on, owner) = (on.on(claims.config()), public(owner)?);
-            let position = on.position_of(owner);
+        MarketCmd::WithdrawCollateral { on, owner, index, assets, all, to, claims } => {
+            let on = on.on(claims.config(private(&[Some(owner), to])));
+            let owner = client.owner(owner, &on.market, index)?;
+            let position = on.position(&owner);
             let assets = match assets {
                 Some(assets) if !all => assets,
                 _ => client.position_shares(on.lending, position).await?.collateral,
             };
-            client.withdraw_collateral(&on, owner, assets, to.map(public).transpose()?).await?;
+            client.withdraw_collateral(&on, &owner, assets, to).await?;
             println!("{}", client.position_shares(on.lending, position).await?.collateral);
         }
-        MarketCmd::Borrow { on, owner, assets, to, claims } => {
-            let (on, owner) = (on.on(claims.config()), public(owner)?);
-            println!("{}", client.borrow(&on, owner, assets, to.map(public).transpose()?).await?);
+        MarketCmd::Borrow { on, owner, index, assets, to, claims } => {
+            let on = on.on(claims.config(private(&[Some(owner), to])));
+            let owner = client.owner(owner, &on.market, index)?;
+            println!("{}", client.borrow(&on, &owner, assets, to).await?);
         }
-        MarketCmd::Repay { on, from, owner, shares, all, claims } => {
-            let (on, from) = (on.on(claims.config()), public(from)?);
-            let position = on.position_of(owner.map(public).transpose()?.unwrap_or(from));
+        MarketCmd::Repay { on, from, owner, index, shares, all, claims } => {
+            let on = on.on(claims.config(private(&[Some(from), owner])));
+            let owner = client.owner(owner.unwrap_or(from), &on.market, index)?;
+            let position = on.position(&owner);
             let shares = match shares {
                 Some(shares) if !all => shares,
                 _ => client.position_shares(on.lending, position).await?.borrow_shares,
             };
             println!("{}", client.repay(&on, from, position, shares).await?);
         }
-        MarketCmd::Liquidate { on, liquidator, owner, to, claims } => {
-            let on = on.on(claims.config());
-            let position = on.position_of(public(owner)?);
+        MarketCmd::Liquidate { on, liquidator, position, to, claims } => {
+            let on = on.on(claims.config(false));
+            let position = position.id();
             match client.liquidate(&on, public(liquidator)?, position, to.map(public).transpose()?).await? {
                 Some(l) => println!("{} {} {}", l.repaid_assets, l.seized, l.bad_shares),
                 None => bail!("{position} isn't liquidatable"),
             }
         }
         MarketCmd::ClaimFees { on } => println!("{}", client.claim_fees(&on.on(ClaimConfig::default())).await?),
-        MarketCmd::Positions { lending } => {
+        MarketCmd::Positions { lending, market: Some(market), owner: Some(owner) } => {
+            for (index, position, p) in client.owned_positions(lending.id(), &market, owner).await? {
+                println!("{index} {position} supply {} collateral {} borrow {}", p.supply_shares, p.collateral, p.borrow_shares);
+            }
+        }
+        MarketCmd::Positions { lending, .. } => {
             let mut scanner = Scanner::new(lending.id(), 1);
             scanner.scan(client).await?;
             for (position, market) in &scanner.positions {
@@ -485,7 +525,7 @@ pub async fn status(client: &Client, cmd: Status) -> Result<()> {
     println!("  price {} (1e36 scale), {age} s old, round {}", feed.price, feed.round);
     if let Some(owner) = cmd.owner {
         let on = On { lending, market: cmd.market, claims: ClaimConfig::default(), payer: None };
-        let position = on.position_of(public(owner)?);
+        let position = on.position(&client.owner(owner, &cmd.market, cmd.index)?);
         let Some(pos) = client.position(lending, position).await? else {
             println!("position {position}: empty");
             return Ok(());

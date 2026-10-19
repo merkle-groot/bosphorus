@@ -4,6 +4,7 @@
 //! Private txs need real proofs, or `RISC0_DEV_MODE=1` against a dev-mode sequencer.
 
 mod lending;
+mod report;
 
 use anyhow::{Context as _, Result};
 use bosphorus_client::{Client, Holder, LENDING_ELF, ORACLE_ELF, TOKEN_ELF};
@@ -30,6 +31,8 @@ enum Command {
     Market(lending::MarketCmd),
     /// A market's utilisation and rates, and optionally a position's health.
     Status(lending::Status),
+    /// What a tx published, and a scan for an owner's identifying bytes.
+    TxReport(report::TxReport),
 }
 
 #[derive(Subcommand)]
@@ -190,8 +193,9 @@ async fn main() -> Result<()> {
             println!("{}", Holder::Public(client.deploy(LENDING_ELF, payer.id()).await?));
         }
         Command::Lending(cmd) => lending::admin(&client, cmd).await?,
-        Command::Market(cmd) => lending::market(&client, cmd).await?,
+        Command::Market(cmd) => lending::market(&mut client, cmd).await?,
         Command::Status(cmd) => lending::status(&client, cmd).await?,
+        Command::TxReport(cmd) => report::tx_report(&client, cmd).await?,
     }
     Ok(())
 }
