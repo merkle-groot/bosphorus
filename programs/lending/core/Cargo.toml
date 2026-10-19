@@ -1,0 +1,13 @@
+[package]
+name = "bosphorus-lending"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Instruction, effect, event and shard types of the `lending` program, plus its PDA seeds; shared by
+# the guest and clients. The maths is in `bosphorus-core`.
+[dependencies]
+borsh.workspace = true
+lee_core.workspace = true
+risc0-zkvm.workspace = true
+bosphorus-core.workspace = true

@@ -10,7 +10,7 @@ license.workspace = true
 risc0-build.workspace = true
 
 [package.metadata.risc0]
-methods = ["../token/guest", "../oracle/guest", "../test-caller"]
+methods = ["../token/guest", "../oracle/guest", "../lending/guest", "../test-caller"]
 
 # Essential tests (money safety + authorisation), run in-process on `V03State`.
 [dev-dependencies]
@@ -19,5 +19,7 @@ lee_core.workspace = true
 program_loader_core.workspace = true
 bosphorus-token.workspace = true
 bosphorus-oracle.workspace = true
+bosphorus-lending.workspace = true
+bosphorus-core.workspace = true
 borsh.workspace = true
 anyhow.workspace = true

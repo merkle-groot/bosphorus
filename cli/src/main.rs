@@ -3,8 +3,10 @@
 //! Accounts are written `Public/<id>` or `Private/<id>` (a bare id means public).
 //! Private txs need real proofs, or `RISC0_DEV_MODE=1` against a dev-mode sequencer.
 
+mod lending;
+
 use anyhow::{Context as _, Result};
-use bosphorus_client::{Client, Holder, ORACLE_ELF, TOKEN_ELF};
+use bosphorus_client::{Client, Holder, LENDING_ELF, ORACLE_ELF, TOKEN_ELF};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -20,6 +22,14 @@ enum Command {
     Token(Token),
     #[command(subcommand)]
     Oracle(Oracle),
+    /// Deploy and administer the lending program.
+    #[command(subcommand)]
+    Lending(lending::Admin),
+    /// Create markets and act on positions.
+    #[command(subcommand)]
+    Market(lending::MarketCmd),
+    /// A market's utilisation and rates, and optionally a position's health.
+    Status(lending::Status),
 }
 
 #[derive(Subcommand)]
@@ -176,6 +186,12 @@ async fn main() -> Result<()> {
                 println!("{:?}", client.feed(feed, id(oracle)).await?);
             }
         },
+        Command::Lending(lending::Admin::Deploy { payer }) => {
+            println!("{}", Holder::Public(client.deploy(LENDING_ELF, payer.id()).await?));
+        }
+        Command::Lending(cmd) => lending::admin(&client, cmd).await?,
+        Command::Market(cmd) => lending::market(&client, cmd).await?,
+        Command::Status(cmd) => lending::status(&client, cmd).await?,
     }
     Ok(())
 }

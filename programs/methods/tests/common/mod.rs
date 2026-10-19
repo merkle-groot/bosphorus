@@ -81,20 +81,21 @@ impl Chain {
     }
 
     /// A public tx calling `program`; `selectors` are `(account, shard owner)`. Fee-exempt
-    /// (fees are charged by the sequencer, not `V03State`). Commits only on success.
+    /// (fees are charged by the sequencer, not `V03State`). Commits only on success, and returns
+    /// the charged cycles (the sequencer's gas, S1).
     pub fn call<I: BorshSerialize>(
         &mut self,
         program: AccountId,
         selectors: Vec<(AccountId, AccountId)>,
         signers: &[&PrivateKey],
         instruction: I,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         let nonces = signers.iter().map(|k| self.state.get_account_by_id(addr(k)).nonce).collect();
         let selectors = selectors.into_iter().map(|(a, p)| ProgramShardSelector::new(a, p)).collect();
         let message = Message::try_new(program, selectors, nonces, instruction)?;
         let witness_set = WitnessSet::for_message(&message, signers);
         let tx = PublicTransaction::new(message, witness_set);
-        let (diff, _) = ValidatedStateDiff::from_public_transaction_with_cycle_budget(
+        let (diff, charge) = ValidatedStateDiff::from_public_transaction_with_cycle_budget(
             &tx,
             &self.state,
             self.block,
@@ -104,7 +105,7 @@ impl Chain {
         .context("tx failed")?;
         drop(self.state.apply_state_diff(diff));
         self.block += 1;
-        Ok(())
+        Ok(charge.cycles)
     }
 
     pub fn shard(&self, account: AccountId, program: AccountId) -> Vec<u8> {

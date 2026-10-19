@@ -49,7 +49,7 @@ expect "$(bos token balance --token "$TKA" --account "$ALICE")" 600000 "public T
 
 step "oracle: deploy, create feed, publish TKA/TKB = 2.5"
 ORACLE=$(bos oracle deploy --payer $PAYER)
-bos oracle create-feed --oracle "$ORACLE" --publisher $PAYER --name TKA/TKB > /dev/null
+FEED=$(bos oracle create-feed --oracle "$ORACLE" --publisher $PAYER --name TKA/TKB)
 bos oracle publish --oracle "$ORACLE" --publisher $PAYER --name TKA/TKB --price 2.5 \
   --loan-decimals 6 --collateral-decimals 6
 
@@ -57,6 +57,7 @@ cat > .localnet/phase1.env <<EOF
 TKA=$TKA
 TKB=$TKB
 ORACLE=$ORACLE
+FEED=$FEED
 PUBLISHER=$PAYER
 SHIELDED=$SHIELDED
 EOF

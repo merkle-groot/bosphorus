@@ -30,12 +30,12 @@ impl Token {
     fn mint(&mut self, authority: &lee::PrivateKey, to: AccountId, amount: u128) -> anyhow::Result<()> {
         let t = self.token;
         let accounts = vec![(addr(authority), t), (config_id(&t), t), (to, t)];
-        self.chain.call(t, accounts, &[authority], Instruction::Mint { amount })
+        self.chain.call(t, accounts, &[authority], Instruction::Mint { amount }).map(drop)
     }
 
     fn transfer(&mut self, from: AccountId, to: AccountId, signers: &[&lee::PrivateKey], amount: u128) -> anyhow::Result<()> {
         let t = self.token;
-        self.chain.call(t, vec![(from, t), (to, t)], signers, Instruction::Transfer { amount })
+        self.chain.call(t, vec![(from, t), (to, t)], signers, Instruction::Transfer { amount }).map(drop)
     }
 
     fn balance(&self, of: AccountId) -> u128 {

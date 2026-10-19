@@ -3,13 +3,15 @@
 //! Every tx helper waits for inclusion. Inclusion doesn't mean success (a failed public tx still
 //! lands and pays, constraints §5), so callers check the resulting state.
 
+pub mod lending;
+
 use std::{borrow::Cow, collections::HashMap, fmt, str::FromStr};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use borsh::BorshSerialize;
 use common::transaction::LeeTransaction;
 use lee::{
-    Account, AccountId, ProgramShardSelector, privacy_preserving_transaction::circuit::ProgramWithDependencies,
+    AccountId, ProgramShardSelector, privacy_preserving_transaction::circuit::ProgramWithDependencies,
     program::Program,
 };
 use lee_core::program::{PROGRAM_LOADER_ACCOUNT_ID, ProgramHeader};
@@ -17,7 +19,7 @@ use wallet::{
     AccDecodeData, AccountIdentity, AccountMention, WalletCore, program_facades::program_loader::ProgramLoader,
 };
 
-pub use bosphorus_methods::{ORACLE_ELF, TOKEN_ELF};
+pub use bosphorus_methods::{LENDING_ELF, ORACLE_ELF, TOKEN_ELF};
 pub use bosphorus_oracle::{Feed, U256};
 pub use bosphorus_token::Config as TokenConfig;
 
@@ -205,7 +207,7 @@ impl Client {
     pub async fn token_balance(&self, token: AccountId, holder: Holder) -> Result<u128> {
         let account = match holder {
             Holder::Public(id) => self.wallet.get_account_view(ProgramShardSelector::new(id, token)).await?,
-            Holder::Private(id) => self.wallet.get_account_private(id).unwrap_or_else(Account::default),
+            Holder::Private(id) => self.wallet.get_account_private(id).unwrap_or_default(),
         };
         bosphorus_token::decode_balance(account.data.shard(token)).map_err(|e| anyhow!("{e}"))
     }
