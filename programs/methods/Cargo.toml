@@ -1,0 +1,23 @@
+[package]
+name = "bosphorus-methods"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Builds the program guests with the local risc0 toolchain (no Docker here, so image ids differ
+# from a Docker build) and embeds `TOKEN_ELF`, `ORACLE_ELF`, ...
+[build-dependencies]
+risc0-build.workspace = true
+
+[package.metadata.risc0]
+methods = ["../token/guest", "../oracle/guest", "../test-caller"]
+
+# Essential tests (money safety + authorisation), run in-process on `V03State`.
+[dev-dependencies]
+lee.workspace = true
+lee_core.workspace = true
+program_loader_core.workspace = true
+bosphorus-token.workspace = true
+bosphorus-oracle.workspace = true
+borsh.workspace = true
+anyhow.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "bosphorus-token"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Instruction, effect and state types of the `token` program, shared by the guest and clients.
+[dependencies]
+borsh.workspace = true
+lee_core.workspace = true
+risc0-zkvm.workspace = true

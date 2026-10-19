@@ -1,0 +1,13 @@
+[package]
+name = "spike-methods"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Builds the guests in ./guest with the local risc0 toolchain (no Docker on this machine) and
+# embeds `<NAME>_ELF` / `<NAME>_ID` / `<NAME>_PATH`.
+[build-dependencies]
+risc0-build.workspace = true
+
+[package.metadata.risc0]
+methods = ["guest"]

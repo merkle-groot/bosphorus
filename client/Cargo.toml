@@ -1,0 +1,19 @@
+[package]
+name = "bosphorus-client"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Client library on top of LEZ's `wallet`: deploys, state readers, tx builders.
+[dependencies]
+wallet.workspace = true
+common.workspace = true
+lee.workspace = true
+lee_core.workspace = true
+program_loader_core.workspace = true
+bosphorus-core.workspace = true
+bosphorus-token.workspace = true
+bosphorus-oracle.workspace = true
+bosphorus-methods.workspace = true
+anyhow.workspace = true
+borsh.workspace = true

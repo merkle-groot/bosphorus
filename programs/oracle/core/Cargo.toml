@@ -1,0 +1,12 @@
+[package]
+name = "bosphorus-oracle"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Instruction, effect and feed types of the `oracle` program, shared by the guest, `lending` and clients.
+[dependencies]
+borsh.workspace = true
+bosphorus-core.workspace = true
+lee_core.workspace = true
+risc0-zkvm.workspace = true

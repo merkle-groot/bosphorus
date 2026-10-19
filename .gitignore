@@ -1,0 +1,8 @@
+/target
+/.localnet
+.DS_Store
+
+# Code only: progress docs, notes and agent instructions stay local.
+/docs
+/CLAUDE.md
+/scripts/*.md

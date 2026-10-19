@@ -1,0 +1,14 @@
+[package]
+name = "bosphorus-test-caller"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Test-only guest: moves a custom token out of its own PDA. Never deployed.
+[[bin]]
+name = "test_caller"
+path = "src/bin/test_caller.rs"
+
+[dependencies]
+lee_core.workspace = true
+bosphorus-token.workspace = true

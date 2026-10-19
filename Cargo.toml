@@ -1,0 +1,58 @@
+[workspace]
+resolver = "3"
+members = [
+    "core",
+    "client",
+    "cli",
+    "programs/token/core",
+    "programs/token/guest",
+    "programs/oracle/core",
+    "programs/oracle/guest",
+    "programs/test-caller",
+    "programs/methods",
+    "spikes/methods",
+    "spikes/methods/guest",
+    "spikes/harness",
+]
+exclude = ["spikes/vendor"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# LEZ, pinned to the testnet version. Never bump without re-checking docs/design/lez-v0.3.1-constraints.md.
+lee = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1" }
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1" }
+program_loader_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1" }
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1" }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1" }
+
+# Same versions as LEZ v0.3.1.
+risc0-zkvm = { version = "3.0.5", default-features = false, features = ["std"] }
+risc0-build = "3.0.5"
+borsh = { version = "1.5.7", features = ["derive"] }
+sha2 = "0.10.8"
+anyhow = "1.0"
+ruint = { version = "1.20", features = ["borsh"] }
+
+bosphorus-core = { path = "core" }
+bosphorus-token = { path = "programs/token/core" }
+bosphorus-oracle = { path = "programs/oracle/core" }
+bosphorus-methods = { path = "programs/methods" }
+spike-methods = { path = "spikes/methods" }
+
+# Copied from LEZ v0.3.1: keccak speedup for in-guest ML-KEM. Needed for identical resolution.
+[patch.crates-io]
+keccak = { git = "https://github.com/logos-blockchain/sponges", rev = "3a56e99771beedf04946eab21a4a62adc2951377" }
+# Spike-only: risc0-sys 1.5.0's Metal kernels don't compile with Xcode 27's Metal compiler
+# (`Fp = 0` is ambiguous). Three `= 0` → `= Fp(0)` in poseidon2.metal, same semantics.
+# Only built with `--features prove` (in-process/Metal proving). See docs/spikes/S4-proving.md.
+risc0-sys = { path = "spikes/vendor/risc0-sys" }
+
+[profile.dev]
+debug = "line-tables-only"
+
+# risc0 executor is painfully slow unoptimised; the host side of spikes runs it a lot.
+[profile.dev.package."*"]
+opt-level = 3
