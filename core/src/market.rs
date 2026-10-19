@@ -6,7 +6,7 @@ use crate::{
     Error, Interval, MAX_FEE, Result, WAD,
     irm::{IrmParams, utilization},
     math::{narrow, taylor3, u256, w_mul_down},
-    shares::{check_ratio, exact_to_shares_down},
+    shares::{check_ratio, exact_to_assets_up, exact_to_shares_down},
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -35,6 +35,10 @@ pub enum MarketOp {
     /// Accrue and check `rb`, for a health check elsewhere (`withdraw_collateral`).
     Check { rb: Interval<u128> },
     SetFee { fee: u128 },
+    /// Burn `repaid_shares` for `repaid_assets`, then socialise `bad_shares` at the real ratio.
+    Liquidate { rb: Interval<u128>, repaid_shares: u128, repaid_assets: u128, bad_shares: u128 },
+    /// Move `shares` out of `pending_fee_shares` (they're already in `total_supply_shares`).
+    ClaimFees { shares: u128 },
 }
 
 impl MarketState {
@@ -111,6 +115,23 @@ impl MarketState {
                     return Err(Error::FeeTooHigh);
                 }
                 self.fee = fee;
+            }
+            MarketOp::Liquidate { rb, repaid_shares, repaid_assets, bad_shares } => {
+                check_ratio(&rb, self.total_borrow_assets, self.total_borrow_shares)?;
+                self.total_borrow_shares = sub(self.total_borrow_shares, repaid_shares, Error::InsufficientShares)?;
+                self.total_borrow_assets = self.total_borrow_assets.saturating_sub(repaid_assets);
+                if bad_shares != 0 {
+                    // Morpho: the debt left on a position with no collateral is written off against
+                    // the suppliers, lowering `rs`.
+                    let bad_assets = exact_to_assets_up(bad_shares, self.total_borrow_assets, self.total_borrow_shares)?
+                        .min(self.total_borrow_assets);
+                    self.total_borrow_shares = sub(self.total_borrow_shares, bad_shares, Error::InsufficientShares)?;
+                    self.total_borrow_assets -= bad_assets;
+                    self.total_supply_assets = sub(self.total_supply_assets, bad_assets, Error::InsufficientLiquidity)?;
+                }
+            }
+            MarketOp::ClaimFees { shares } => {
+                self.pending_fee_shares = sub(self.pending_fee_shares, shares, Error::InsufficientShares)?;
             }
         }
         Ok(())

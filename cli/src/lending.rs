@@ -5,8 +5,8 @@ use anyhow::{Context as _, Result, bail};
 use bosphorus_client::{
     Client, Holder,
     lending::{
-        ClaimConfig, Instruction, IrmParams, MarketId, MarketParams, On, market_id_hex, market_status, now_ms,
-        parse_market_id, position_status,
+        ClaimConfig, Instruction, IrmParams, MarketId, MarketParams, On, Scanner, market_id_hex, market_status,
+        now_ms, parse_market_id, position_status,
     },
 };
 use bosphorus_core::{U256, format_wad, parse_wad};
@@ -272,6 +272,29 @@ pub enum MarketCmd {
         #[command(flatten)]
         claims: ClaimArgs,
     },
+    /// Liquidate `owner`'s position in full if it's unhealthy. Prints "repaid seized bad_shares".
+    Liquidate {
+        #[command(flatten)]
+        on: MarketArgs,
+        #[arg(long)]
+        liquidator: Holder,
+        #[arg(long)]
+        owner: Holder,
+        #[arg(long)]
+        to: Option<Holder>,
+        #[command(flatten)]
+        claims: ClaimArgs,
+    },
+    /// Move pending fee shares to the fee recipient's position (anyone can). Prints the shares.
+    ClaimFees {
+        #[command(flatten)]
+        on: MarketArgs,
+    },
+    /// Positions under a lending program (scans blocks), with their market.
+    Positions {
+        #[arg(long)]
+        lending: Holder,
+    },
 }
 
 #[derive(Args)]
@@ -413,6 +436,22 @@ pub async fn market(client: &Client, cmd: MarketCmd) -> Result<()> {
                 _ => client.position_shares(on.lending, position).await?.borrow_shares,
             };
             println!("{}", client.repay(&on, from, position, shares).await?);
+        }
+        MarketCmd::Liquidate { on, liquidator, owner, to, claims } => {
+            let on = on.on(claims.config());
+            let position = on.position_of(public(owner)?);
+            match client.liquidate(&on, public(liquidator)?, position, to.map(public).transpose()?).await? {
+                Some(l) => println!("{} {} {}", l.repaid_assets, l.seized, l.bad_shares),
+                None => bail!("{position} isn't liquidatable"),
+            }
+        }
+        MarketCmd::ClaimFees { on } => println!("{}", client.claim_fees(&on.on(ClaimConfig::default())).await?),
+        MarketCmd::Positions { lending } => {
+            let mut scanner = Scanner::new(lending.id(), 1);
+            scanner.scan(client).await?;
+            for (position, market) in &scanner.positions {
+                println!("{position} {}", market_id_hex(market));
+            }
         }
     }
     Ok(())

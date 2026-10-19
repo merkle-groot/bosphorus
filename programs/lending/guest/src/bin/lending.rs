@@ -199,6 +199,51 @@ fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             plan.call(transfer(params.loan_asset, m.loan_vault, to, assets, Some(loan_vault_seed(&market_id))));
             event(&mut plan, Event::Borrow { market_id, position: position.account_id, assets, shares });
         }
+        Instruction::Liquidate { params, claimed, amount, price, rb, window: w } => {
+            let [liquidator, market_account, position, feed, loan_vault, collateral_vault, rest @ ..] = accounts else {
+                panic!("takes [liquidator, market, position, feed, loan_vault, collateral_vault, (to)]")
+            };
+            let (market_id, m) = market(this, &params, market_account);
+            assert_eq!(loan_vault.account_id, m.loan_vault, "wrong loan vault");
+            assert_eq!(collateral_vault.account_id, m.collateral_vault, "wrong collateral vault");
+            let liquidation = ok(claims::liquidation(amount, &claimed, &price, &rb, params.lltv));
+            let health = ok(claims::liquidation_health(&price, &rb, params.lltv));
+            let end = window(&mut plan, w);
+            assert_eq!(feed.account_id, params.oracle_feed, "wrong oracle feed");
+            plan.inspect(feed, params.oracle_program, &Effect::Price { claim: price, max_age: params.max_price_age, window_end: end });
+            let op = MarketOp::Liquidate {
+                rb,
+                repaid_shares: liquidation.repaid_shares,
+                repaid_assets: liquidation.repaid_assets,
+                bad_shares: liquidation.bad_shares,
+            };
+            plan.effect(market_account, &Effect::Market { t: w.t, op });
+            let op = PositionOp::Liquidate { claimed, health, liquidation };
+            plan.effect(position, &Effect::Position { market_id, op });
+            let l = liquidation;
+            plan.call(transfer(params.loan_asset, liquidator.account_id, m.loan_vault, l.repaid_assets, None));
+            if l.seized != 0 {
+                let to = payout(liquidator, rest);
+                let seed = Some(collateral_vault_seed(&market_id));
+                plan.call(transfer(params.collateral_asset, m.collateral_vault, to, l.seized, seed));
+            }
+            event(&mut plan, Event::Liquidate { market_id, position: position.account_id, liquidation });
+        }
+        Instruction::ClaimFees { params, recipient, shares } => {
+            let [config, market_account, position] = accounts else {
+                panic!("takes [config, market, recipient_position]")
+            };
+            assert!(shares > 0, "zero amount");
+            assert_eq!(config.account_id, config_id(this), "wrong config account");
+            let (market_id, _) = market(this, &params, market_account);
+            let expected = position_id(this, &market_id, &recipient, &[0; 32]);
+            assert_eq!(position.account_id, expected, "not the recipient's position");
+            plan.effect(config, &Effect::CheckFeeRecipient { recipient });
+            // t = 0: no accrual (the shares claimed were read before this tx).
+            plan.effect(market_account, &Effect::Market { t: 0, op: MarketOp::ClaimFees { shares } });
+            plan.effect(position, &Effect::Position { market_id, op: PositionOp::Supply { shares } });
+            event(&mut plan, Event::FeesClaimed { market_id, position: position.account_id, shares });
+        }
         Instruction::Repay { params, shares, rb, window: w } => {
             let [market_account, position, payer, loan_vault] = accounts else {
                 panic!("takes [market, position, payer, loan_vault]")
@@ -260,6 +305,10 @@ fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
             let config = config(pre_data);
             assert!(config.enabled_lltvs.contains(&lltv), "LLTV not enabled");
             assert!(config.enabled_irms.contains(&irm), "IRM not enabled");
+            None
+        }
+        Effect::CheckFeeRecipient { recipient } => {
+            assert_eq!(config(pre_data).fee_recipient, recipient, "not the fee recipient");
             None
         }
         Effect::CreateMarket { params, t } => {

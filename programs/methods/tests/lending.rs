@@ -8,8 +8,8 @@ mod common;
 
 use bosphorus_core::{MAX_WINDOW_MS, WAD, claims, scale_price};
 use bosphorus_lending::{
-    HealthClaim, Instruction, Interval, IrmParams, Market, MarketAccounts, MarketParams, Position, Shard, U256,
-    Window, config_id, position_id,
+    Claimed, HealthClaim, Instruction, Interval, IrmParams, Liquidation, LiquidationAmount, Market, MarketAccounts,
+    MarketParams, Position, Shard, U256, Window, config_id, position_id,
 };
 use bosphorus_methods::{LENDING_ELF, ORACLE_ELF, TOKEN_ELF};
 use common::{Chain, addr, key};
@@ -22,6 +22,7 @@ const ADMIN: u8 = 5;
 const MINTER: u8 = 1;
 const PUBLISHER: u8 = 6;
 const LENDING: u8 = 7;
+const KEEPER: u8 = 8;
 const W: u64 = 60_000;
 const ZERO: [u8; 32] = [0; 32];
 
@@ -51,7 +52,7 @@ fn setup() -> World {
         let init = bosphorus_token::Instruction::Init { mint_authority: addr(&key(MINTER)), decimals: 6 };
         let config = bosphorus_token::config_id(&token);
         chain.call(token, vec![(token, token), (config, token)], &[&deployer], init).unwrap();
-        for holder in [ALICE, BOB, MALLORY] {
+        for holder in [ALICE, BOB, MALLORY, KEEPER] {
             let accounts = vec![(addr(&key(MINTER)), token), (config, token), (addr(&key(holder)), token)];
             let mint = bosphorus_token::Instruction::Mint { amount: 1_000_000_000_000 };
             chain.call(token, accounts, &[&key(MINTER)], mint).unwrap();
@@ -115,7 +116,9 @@ impl World {
         bosphorus_token::decode_balance(&self.chain.shard(of, token)).unwrap()
     }
 
+    /// Publishes at `now + 1 ms` (feed timestamps strictly increase).
     fn publish(&mut self, price: &str) {
+        self.chain.now += 1;
         let publisher = key(PUBLISHER);
         let accounts = vec![(addr(&publisher), self.oracle), (self.feed, self.oracle)];
         let price = scale_price(price, 6, 6).unwrap();
@@ -213,6 +216,49 @@ impl World {
     fn withdraw_collateral(&mut self, owner: u8, assets: u128) -> anyhow::Result<u64> {
         let health = self.health();
         self.withdraw_collateral_as(owner, Some(owner), self.position_of(owner), assets, Some(health))
+    }
+
+    /// What a keeper submits: exact position claim, price `[0, feed]`, tight ratios.
+    fn liquidation_claims(&self, owner: u8) -> (Claimed, Interval<U256>, Interval<u128>) {
+        let p = self.position(owner);
+        let claimed = Claimed { collateral: p.collateral, borrow_shares: p.borrow_shares };
+        (claimed, Interval { lo: U256::ZERO, hi: self.price() }, self.ratios().1)
+    }
+
+    fn liquidate_with(
+        &mut self,
+        owner: u8,
+        claimed: Claimed,
+        amount: LiquidationAmount,
+        price: Interval<U256>,
+        rb: Interval<u128>,
+    ) -> anyhow::Result<u64> {
+        let (l, m) = (self.lending, self.accounts());
+        let accounts = vec![
+            (addr(&key(KEEPER)), self.tkb),
+            (m.market, l),
+            (self.position_of(owner), l),
+            (self.feed, self.oracle),
+            (m.loan_vault, self.tkb),
+            (m.collateral_vault, self.tka),
+        ];
+        let ix = Instruction::Liquidate { params: self.params.clone(), claimed, amount, price, rb, window: self.window() };
+        self.lend(ix, accounts, &[&key(KEEPER)])
+    }
+
+    /// A full liquidation as the keeper would size it; returns what core derived.
+    fn liquidate(&mut self, owner: u8) -> anyhow::Result<(u64, Liquidation)> {
+        let (claimed, price, rb) = self.liquidation_claims(owner);
+        let amount = claims::full_liquidation(&claimed, &price, &rb, self.params.lltv)?;
+        let derived = claims::liquidation(amount, &claimed, &price, &rb, self.params.lltv)?;
+        Ok((self.liquidate_with(owner, claimed, amount, price, rb)?, derived))
+    }
+
+    fn claim_fees(&mut self, recipient: AccountId, shares: u128) -> anyhow::Result<u64> {
+        let l = self.lending;
+        let position = position_id(&l, &self.params.id(), &recipient, &ZERO);
+        let accounts = vec![(config_id(&l), l), (self.accounts().market, l), (position, l)];
+        self.lend(Instruction::ClaimFees { params: self.params.clone(), recipient, shares }, accounts, &[])
     }
 
     fn repay(&mut self, payer: u8, position: AccountId, shares: u128) -> anyhow::Result<u64> {
@@ -380,6 +426,93 @@ fn admin_ops_need_the_admin() {
     assert_eq!(w.market().state.fee, WAD / 10);
 }
 
+/// Alice at her LLTV limit: bob lends 3,000,000, alice borrows 2,000,000 against 1,000,000 TKA at 2.5.
+fn at_the_limit() -> World {
+    let mut w = funded();
+    w.supply(BOB, w.position_of(BOB), 2_000_000).unwrap();
+    w.borrow(ALICE, 2_000_000).unwrap();
+    w
+}
+
+#[test]
+fn a_healthy_position_cant_be_liquidated() {
+    let mut w = at_the_limit();
+    let (claimed, price, rb) = w.liquidation_claims(ALICE);
+    let some = LiquidationAmount::RepayShares(claimed.borrow_shares / 10);
+    assert!(w.liquidate_with(ALICE, claimed, some, price, rb).is_err(), "healthy, honest claims");
+    // Claims that would make it look unhealthy are rejected by the feed's and the market's applies.
+    let low_price = Interval { lo: U256::ZERO, hi: price.hi * U256::from(9u8) / U256::from(10u8) };
+    assert!(w.liquidate_with(ALICE, claimed, some, low_price, rb).is_err(), "price claim below the feed");
+    let high_rb = Interval { lo: rb.hi * 2, hi: rb.hi * 3 };
+    assert!(w.liquidate_with(ALICE, claimed, some, price, high_rb).is_err(), "rb claim above the market");
+    let mut more_debt = claimed;
+    more_debt.borrow_shares *= 2;
+    assert!(w.liquidate_with(ALICE, more_debt, some, price, rb).is_err(), "position claim not exact");
+    assert_eq!(w.position(ALICE).borrow_shares, claimed.borrow_shares);
+
+    // The price drops to 2.4: debt 2,000,000 > 1,000,000 × 2.4 × 0.8. The keeper repays it all.
+    w.publish("2.4");
+    let (keeper_tkb, keeper_tka) = (w.balance(w.tkb, addr(&key(KEEPER))), w.balance(w.tka, addr(&key(KEEPER))));
+    let (stale_claimed, ..) = w.liquidation_claims(ALICE);
+    let (_, l) = w.liquidate(ALICE).unwrap();
+    assert_eq!((l.repaid_shares, l.bad_shares), (stale_claimed.borrow_shares, 0), "repaid in full, no bad debt");
+    // The amounts moved are exactly what core derives from the claims.
+    assert_eq!(w.balance(w.tkb, addr(&key(KEEPER))), keeper_tkb - l.repaid_assets);
+    assert_eq!(w.balance(w.tka, addr(&key(KEEPER))), keeper_tka + l.seized);
+    // 2,000,000 × 1.0638 / 2.4 = 886,524 TKA seized; alice keeps the rest.
+    assert_eq!((l.repaid_assets, l.seized), (2_000_000, 886_524));
+    let p = w.position(ALICE);
+    assert_eq!((p.borrow_shares, p.collateral), (0, 1_000_000 - 886_524));
+    // A second liquidation of the now empty, healthy position fails.
+    assert!(w.liquidate(ALICE).is_err());
+}
+
+#[test]
+fn bad_debt_lowers_rs_and_zeroes_the_position() {
+    let mut w = at_the_limit();
+    let rs_before = w.ratios().0;
+    let supplied_before = w.market().state.total_supply_assets;
+    // The price crashes to 1: 1,000,000 TKA is worth 1,000,000 against 2,000,000 of debt.
+    w.publish("1");
+    let (_, l) = w.liquidate(ALICE).unwrap();
+    assert_eq!(l.seized, 1_000_000, "all the collateral");
+    assert!(l.bad_shares > 0);
+    let p = w.position(ALICE);
+    assert_eq!((p.collateral, p.borrow_shares), (0, 0), "position zeroed");
+    let m = w.market().state;
+    assert_eq!((m.total_borrow_assets, m.total_borrow_shares), (0, 0));
+    // 1,000,000 / 1.0638 ≈ 940,000 repaid; the remaining ~1,060,000 is written off against bob.
+    let lost = supplied_before - m.total_supply_assets;
+    assert_eq!(lost, 2_000_000 - l.repaid_assets);
+    assert!(w.ratios().0.hi < rs_before.lo, "rs fell");
+    assert_eq!(w.balance(w.tka, w.accounts().collateral_vault), 0);
+    // Bob can still withdraw everything that's left.
+    let shares = w.position(BOB).supply_shares;
+    w.withdraw(BOB, shares).unwrap();
+}
+
+#[test]
+fn fees_go_to_the_fee_recipient() {
+    let mut w = at_the_limit();
+    let accounts = vec![(addr(&key(ADMIN)), w.lending), (config_id(&w.lending), w.lending), (w.accounts().market, w.lending)];
+    let set_fee = Instruction::SetFee { params: w.params.clone(), fee: WAD / 10, window: w.window() };
+    w.lend(set_fee, accounts, &[&key(ADMIN)]).unwrap();
+    w.chain.now += 30 * 24 * 3_600_000;
+    w.publish("2.5");
+    w.repay(ALICE, w.position_of(ALICE), 1_000_000).unwrap(); // accrues a month of interest
+    let pending = w.market().state.pending_fee_shares;
+    assert!(pending > 0);
+
+    assert!(w.claim_fees(addr(&key(MALLORY)), pending).is_err(), "not the fee recipient");
+    assert!(w.claim_fees(addr(&key(ADMIN)), pending + 1).is_err(), "more than pending");
+    w.claim_fees(addr(&key(ADMIN)), pending).unwrap(); // anyone can submit it
+    assert_eq!(w.market().state.pending_fee_shares, 0);
+    let recipient = position_id(&w.lending, &w.params.id(), &addr(&key(ADMIN)), &ZERO);
+    let shard = w.chain.shard(recipient, w.lending);
+    let Shard::Position(p) = borsh::from_slice(&shard).unwrap() else { panic!() };
+    assert_eq!(p.supply_shares, pending);
+}
+
 /// Plan 2.5: charged cycles per operation (the sequencer's execution gas), small shards.
 #[test]
 #[ignore = "prints the cycle table"]
@@ -406,6 +539,21 @@ fn cycle_table() {
     w.repay(ALICE, w.position_of(ALICE), shares).unwrap();
     let alice = w.position_of(ALICE);
     rows.push(("withdraw_collateral (no debt, no price)", w.withdraw_collateral_as(ALICE, Some(ALICE), alice, 100_000, None).unwrap()));
+    let mut fees = at_the_limit();
+    let accounts = vec![(addr(&key(ADMIN)), fees.lending), (config_id(&fees.lending), fees.lending), (fees.accounts().market, fees.lending)];
+    let set_fee = Instruction::SetFee { params: fees.params.clone(), fee: WAD / 10, window: fees.window() };
+    rows.push(("set_fee", fees.lend(set_fee, accounts, &[&key(ADMIN)]).unwrap()));
+    fees.chain.now += 30 * 24 * 3_600_000;
+    fees.publish("2.5");
+    fees.repay(ALICE, fees.position_of(ALICE), 1_000_000).unwrap();
+    let pending = fees.market().state.pending_fee_shares;
+    rows.push(("claim_fees", fees.claim_fees(addr(&key(ADMIN)), pending).unwrap()));
+    let mut liq = at_the_limit();
+    liq.publish("2.4");
+    rows.push(("liquidate (repay all)", liq.liquidate(ALICE).unwrap().0));
+    let mut bad = at_the_limit();
+    bad.publish("1");
+    rows.push(("liquidate (seize all, bad debt)", bad.liquidate(ALICE).unwrap().0));
     let tkb = w.tkb;
     let transfer = bosphorus_token::Instruction::Transfer { amount: 1 };
     rows.push(("(token transfer, for reference)", w.chain.call(tkb, vec![(addr(&key(BOB)), tkb), (addr(&key(ALICE)), tkb)], &[&key(BOB)], transfer).unwrap()));

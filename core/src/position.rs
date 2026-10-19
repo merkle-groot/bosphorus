@@ -39,6 +39,16 @@ pub enum PositionOp {
     WithdrawCollateral { assets: u128, health: Option<Health> },
     Borrow { shares: u128, health: Health },
     Repay { shares: u128 },
+    /// The position must hold exactly `claimed` and be unhealthy at `health` (the liquidator's
+    /// most borrower-friendly bounds: price `hi`, ratio `lo`).
+    Liquidate { claimed: Claimed, health: Health, liquidation: crate::claims::Liquidation },
+}
+
+/// A liquidator's exact claim on a position's contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct Claimed {
+    pub collateral: u128,
+    pub borrow_shares: u128,
 }
 
 impl Position {
@@ -72,6 +82,17 @@ impl Position {
             }
             PositionOp::Repay { shares } => {
                 self.borrow_shares = self.borrow_shares.checked_sub(shares).ok_or(Error::InsufficientShares)?;
+            }
+            PositionOp::Liquidate { claimed, health, liquidation: l } => {
+                if (self.collateral, self.borrow_shares) != (claimed.collateral, claimed.borrow_shares) {
+                    return Err(Error::PositionNotAsClaimed);
+                }
+                if is_healthy(self.collateral, self.borrow_shares, &health)? {
+                    return Err(Error::Healthy);
+                }
+                let burnt = l.repaid_shares.checked_add(l.bad_shares).ok_or(Error::Overflow)?;
+                self.borrow_shares = self.borrow_shares.checked_sub(burnt).ok_or(Error::InsufficientShares)?;
+                self.collateral = self.collateral.checked_sub(l.seized).ok_or(Error::InsufficientCollateral)?;
             }
         }
         Ok(())

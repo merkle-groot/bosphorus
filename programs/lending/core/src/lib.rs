@@ -9,7 +9,8 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 pub use bosphorus_core::{
-    Health, Interval, IrmParams, MarketOp, MarketState, Position, PositionOp, U256, Window,
+    Claimed, Health, Interval, IrmParams, Liquidation, LiquidationAmount, MarketOp, MarketState, Position, PositionOp,
+    U256, Window,
 };
 use lee_core::{
     account::{AccountId, ProgramShardSelector},
@@ -112,6 +113,21 @@ pub enum Instruction {
     /// `⌈shares · rb.hi⌉`; the overpayment (the claim's width and projected interest) lowers the
     /// market's borrow assets, and once those reach zero it sits unowned in the loan vault.
     Repay { params: MarketParams, shares: u128, rb: Interval<u128>, window: Window },
+    /// `[liquidator (signs), market, position, feed, loan_vault, collateral_vault, (to)]`.
+    /// Permissionless. `claimed` must be the position's exact contents; it must be unhealthy at
+    /// `(price.hi, rb.lo)`. The liquidator pays the repaid assets and receives the seized collateral.
+    Liquidate {
+        params: MarketParams,
+        claimed: Claimed,
+        amount: LiquidationAmount,
+        price: Interval<U256>,
+        rb: Interval<u128>,
+        window: Window,
+    },
+    /// `[config, market, recipient_position]`. Permissionless: moves `shares` of the market's
+    /// pending fee shares into the fee recipient's (zero-salt) position; the config checks
+    /// `recipient` is the fee recipient.
+    ClaimFees { params: MarketParams, recipient: AccountId, shares: u128 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -131,6 +147,8 @@ pub enum Effect {
     Admin { signer: AccountId, op: AdminOp },
     /// Config (read only): the market's LLTV and IRM are enabled.
     CheckEnabled { lltv: u128, irm: IrmParams },
+    /// Config (read only): `recipient` is the fee recipient.
+    CheckFeeRecipient { recipient: AccountId },
     /// Market: write once.
     CreateMarket { params: MarketParams, t: u64 },
     /// Market: accrue to `t`, check the op's claim, apply it.
@@ -152,6 +170,9 @@ pub enum Event {
     WithdrawCollateral { market_id: MarketId, position: AccountId, assets: u128 },
     Borrow { market_id: MarketId, position: AccountId, assets: u128, shares: u128 },
     Repay { market_id: MarketId, position: AccountId, assets: u128, shares: u128 },
+    /// The written-off assets are only known to the market's apply; `bad_shares` is the debt burnt.
+    Liquidate { market_id: MarketId, position: AccountId, liquidation: Liquidation },
+    FeesClaimed { market_id: MarketId, position: AccountId, shares: u128 },
 }
 
 impl Event {
@@ -164,6 +185,8 @@ impl Event {
             Self::WithdrawCollateral { .. } => "WithdrawCollateral",
             Self::Borrow { .. } => "Borrow",
             Self::Repay { .. } => "Repay",
+            Self::Liquidate { .. } => "Liquidate",
+            Self::FeesClaimed { .. } => "FeesClaimed",
         }
     }
 

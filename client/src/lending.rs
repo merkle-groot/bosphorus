@@ -5,13 +5,13 @@
 //! the position moved by exactly what `plan` derives from those claims. A failed public tx still
 //! lands and pays (constraints §5), so that check is how a failure shows up.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use bosphorus_core::{WAD, claims, irm, position};
 pub use bosphorus_lending::{
-    Config as LendingConfig, HealthClaim, Instruction, Interval, IrmParams, Market, MarketAccounts, MarketId,
-    MarketParams, Position, Shard, Window,
+    Claimed, Config as LendingConfig, HealthClaim, Instruction, Interval, IrmParams, Liquidation, LiquidationAmount,
+    Market, MarketAccounts, MarketId, MarketParams, Position, Shard, Window,
 };
 use bosphorus_lending::{config_id, position_id};
 use common::transaction::LeeTransaction;
@@ -196,40 +196,28 @@ impl Client {
         Ok(self.position(lending, position).await?.unwrap_or_default())
     }
 
-    /// Every market created under `lending`, found by scanning blocks for `CreateMarket` (the keeper
-    /// discovers positions the same way, S6).
+    /// Every market under `lending`, found by scanning all blocks (see [`Scanner`]).
     pub async fn markets(&self, lending: AccountId) -> Result<Vec<(MarketId, Market)>> {
-        const CHUNK: u64 = 100;
-        let rpc = self.wallet.client_owned();
-        let last = rpc.get_last_block_id().await?;
-        let mut ids = BTreeSet::new();
-        let mut start = 1;
-        while start <= last {
-            let end = (start + CHUNK - 1).min(last);
-            for block in rpc.get_block_range(start, end).await? {
-                for tx in block.body.transactions {
-                    let LeeTransaction::Public(tx) = tx else { continue };
-                    if tx.message.program_account_id != lending {
-                        continue;
-                    }
-                    if let Ok(Instruction::CreateMarket { params, .. }) = borsh::from_slice(&tx.message.instruction_data) {
-                        ids.insert(params.id());
-                    }
-                }
-            }
-            start = end + 1;
-        }
+        let mut scanner = Scanner::new(lending, 1);
+        scanner.scan(self).await?;
         let mut markets = vec![];
-        for id in ids {
-            // A failed create still lands; only list markets that exist.
-            if let Ok(market) = self.market(lending, &id).await {
-                markets.push((id, market));
-            }
+        for id in scanner.markets {
+            markets.push((id, self.market(lending, &id).await?));
         }
         Ok(markets)
     }
 
     async fn send_lending(&self, lending: AccountId, accounts: Vec<AccountMention>, ix: Instruction, payer: Option<AccountId>) -> Result<()> {
+        // A zero amount fails in `plan`, and a zero delta would pass the post-tx checks.
+        let zero = match &ix {
+            Instruction::Supply { assets, .. }
+            | Instruction::SupplyCollateral { assets, .. }
+            | Instruction::WithdrawCollateral { assets, .. }
+            | Instruction::Borrow { assets, .. } => *assets == 0,
+            Instruction::Withdraw { shares, .. } | Instruction::Repay { shares, .. } => *shares == 0,
+            _ => false,
+        };
+        ensure!(!zero, "zero amount");
         self.send_public(lending, accounts, ix, payer).await
     }
 
@@ -388,8 +376,165 @@ impl Client {
         Ok(assets)
     }
 
+    /// Liquidates `position` in full if it is liquidatable now (see [`quote_liquidation`]); the
+    /// seized collateral goes to `to` (default: the liquidator). `Ok(None)` if it isn't.
+    pub async fn liquidate(&self, on: &On, liquidator: AccountId, position: AccountId, to: Option<AccountId>) -> Result<Option<Liquidation>> {
+        let (lending, market) = (on.lending, self.market(on.lending, &on.market).await?);
+        let feed = self.feed(market.params.oracle_feed, market.params.oracle_program).await?;
+        let Some(before) = self.position(lending, position).await? else { return Ok(None) };
+        let Some(q) = quote_liquidation(&market, &before, &feed, &on.claims, now_ms()?)? else { return Ok(None) };
+        let (m, params) = (on.accounts(), &market.params);
+        let balance = self.token_balance(params.loan_asset, crate::Holder::Public(liquidator)).await?;
+        ensure!(balance >= q.liquidation.repaid_assets, "liquidator holds {balance}, needs {}", q.liquidation.repaid_assets);
+        let mut accounts = vec![
+            sign(liquidator, params.loan_asset),
+            read(m.market, lending),
+            read(position, lending),
+            read(params.oracle_feed, params.oracle_program),
+            read(m.loan_vault, params.loan_asset),
+            read(m.collateral_vault, params.collateral_asset),
+        ];
+        accounts.extend(to.filter(|to| *to != liquidator).map(|to| read(to, params.collateral_asset)));
+        let ix = Instruction::Liquidate {
+            params: market.params.clone(),
+            claimed: q.claimed,
+            amount: q.amount,
+            price: q.price,
+            rb: q.rb,
+            window: q.window,
+        };
+        self.send_lending(lending, accounts, ix, on.payer).await?;
+        // Not the position: its owner (or another liquidator) may have moved it since. Only the
+        // liquidator can debit its own balance, so an exact drop means our tx applied.
+        let after = self.token_balance(params.loan_asset, crate::Holder::Public(liquidator)).await?;
+        let l = q.liquidation;
+        ensure!(after + l.repaid_assets == balance, "liquidation didn't apply (price or position moved?)");
+        Ok(Some(l))
+    }
+
+    /// Moves the market's pending fee shares to the fee recipient's position. Returns the shares.
+    pub async fn claim_fees(&self, on: &On) -> Result<u128> {
+        let (lending, market) = (on.lending, self.market(on.lending, &on.market).await?);
+        let recipient = self.lending_config(lending).await?.fee_recipient;
+        let shares = market.state.pending_fee_shares;
+        ensure!(shares > 0, "no pending fees (they accrue with interest when the market is touched)");
+        let accounts = vec![read(config_id(&lending), lending), read(on.accounts().market, lending), read(on.position_of(recipient), lending)];
+        self.send_lending(lending, accounts, Instruction::ClaimFees { params: market.params, recipient, shares }, on.payer).await?;
+        let after = self.market(lending, &on.market).await?;
+        ensure!(after.state.pending_fee_shares + shares == market.state.pending_fee_shares, "claim_fees didn't apply");
+        Ok(shares)
+    }
+
     /// All of a position's supply shares or debt shares, for "withdraw all" / "repay all".
     pub async fn position_shares(&self, lending: AccountId, position: AccountId) -> Result<Position> {
         self.position(lending, position).await?.ok_or_else(|| anyhow!("{position} has never been used"))
+    }
+}
+
+/// A full liquidation as it would be submitted now.
+#[derive(Debug, Clone, Copy)]
+pub struct LiquidationQuote {
+    pub claimed: Claimed,
+    pub amount: LiquidationAmount,
+    pub price: Interval<U256>,
+    pub rb: Interval<u128>,
+    pub window: Window,
+    pub liquidation: Liquidation,
+}
+
+/// `Some` if `position` is liquidatable at the claims a keeper makes now: the exact position, the
+/// price `[0, feed]` (a higher price may land meanwhile; then it fails, as it should), and the
+/// ratio claim from `cfg`. Errors if the feed is too old for the window.
+pub fn quote_liquidation(market: &Market, position: &Position, feed: &Feed, cfg: &ClaimConfig, now_ms: u64) -> Result<Option<LiquidationQuote>> {
+    if position.borrow_shares == 0 {
+        return Ok(None);
+    }
+    let lltv = market.params.lltv;
+    let c = cfg.claims(market, now_ms)?;
+    let price = Interval { lo: U256::ZERO, hi: feed.price };
+    claims::check_price(&price, feed.price, feed.updated_at, market.params.max_price_age, c.window.end()?)
+        .map_err(|e| anyhow!("{e}: feed updated at {} ms", feed.updated_at))?;
+    if position::is_healthy(position.collateral, position.borrow_shares, &claims::liquidation_health(&price, &c.rb, lltv)?)? {
+        return Ok(None);
+    }
+    let claimed = Claimed { collateral: position.collateral, borrow_shares: position.borrow_shares };
+    let amount = claims::full_liquidation(&claimed, &price, &c.rb, lltv)?;
+    let liquidation = claims::liquidation(amount, &claimed, &price, &c.rb, lltv)?;
+    Ok(Some(LiquidationQuote { claimed, amount, price, rb: c.rb, window: c.window, liquidation }))
+}
+
+/// Finds lending markets and positions by scanning sequencer blocks (S6: private-tx events are
+/// dropped and there's no public indexer). Public txs name every lending shard they touch in
+/// their shard selectors; private txs in `public_actions` whose effects target lending's shard.
+/// Each newly seen account is read once and classified.
+pub struct Scanner {
+    pub lending: AccountId,
+    pub next_block: u64,
+    pub markets: std::collections::BTreeSet<MarketId>,
+    /// Position → its market.
+    pub positions: BTreeMap<AccountId, MarketId>,
+    seen: HashSet<AccountId>,
+}
+
+impl Scanner {
+    pub fn new(lending: AccountId, from_block: u64) -> Self {
+        Self { lending, next_block: from_block.max(1), markets: Default::default(), positions: BTreeMap::new(), seen: HashSet::new() }
+    }
+
+    /// Scans up to the chain head. Returns the positions found in this call.
+    pub async fn scan(&mut self, client: &Client) -> Result<Vec<AccountId>> {
+        const CHUNK: u64 = 100;
+        let rpc = client.wallet.client_owned();
+        let last = rpc.get_last_block_id().await?;
+        let mut found = vec![];
+        while self.next_block <= last {
+            let end = (self.next_block + CHUNK - 1).min(last);
+            let mut candidates = vec![];
+            for block in rpc.get_block_range(self.next_block, end).await? {
+                for tx in &block.body.transactions {
+                    candidates.extend(lending_accounts(tx, self.lending));
+                }
+            }
+            for account in candidates {
+                if self.seen.contains(&account) {
+                    continue;
+                }
+                // An empty shard means that tx failed; look again if the account shows up later.
+                match client.lending_shard(account, self.lending).await? {
+                    None => continue,
+                    Some(Shard::Market(m)) => {
+                        self.markets.insert(m.params.id());
+                    }
+                    Some(Shard::Position(p)) => {
+                        self.positions.insert(account, p.market_id);
+                        found.push(account);
+                    }
+                    Some(Shard::Config(_)) => {}
+                }
+                self.seen.insert(account);
+            }
+            self.next_block = end + 1;
+        }
+        Ok(found)
+    }
+}
+
+/// The accounts whose lending shard `tx` touches.
+fn lending_accounts(tx: &LeeTransaction, lending: AccountId) -> Vec<AccountId> {
+    match tx {
+        LeeTransaction::Public(tx) => tx
+            .message
+            .shard_selectors
+            .iter()
+            .filter(|s| s.program_account_id == lending)
+            .map(|s| s.account_id)
+            .collect(),
+        LeeTransaction::PrivacyPreserving(tx) => tx
+            .message
+            .public_actions
+            .iter()
+            .filter(|a| a.effects.iter().any(|e| e.shard_program_account_id == lending))
+            .map(|a| a.account_id)
+            .collect(),
     }
 }

@@ -15,7 +15,8 @@ pub mod shares;
 pub use interval::{Interval, Window};
 pub use irm::IrmParams;
 pub use market::{MarketOp, MarketState};
-pub use position::{Health, Position, PositionOp};
+pub use claims::{Liquidation, LiquidationAmount};
+pub use position::{Claimed, Health, Position, PositionOp};
 pub use ruint::aliases::U256;
 
 pub const WAD: u128 = 1_000_000_000_000_000_000;
@@ -53,6 +54,9 @@ pub enum Error {
     InsufficientCollateral,
     InsufficientLiquidity,
     Unhealthy,
+    Healthy,
+    PositionNotAsClaimed,
+    BadLiquidation,
 }
 
 impl core::fmt::Display for Error {
@@ -73,6 +77,9 @@ impl core::fmt::Display for Error {
             Self::InsufficientCollateral => "not enough collateral",
             Self::InsufficientLiquidity => "not enough liquidity",
             Self::Unhealthy => "position would be unhealthy",
+            Self::Healthy => "position is healthy: can't liquidate",
+            Self::PositionNotAsClaimed => "position doesn't hold what the liquidator claimed",
+            Self::BadLiquidation => "liquidation would repay more shares or seize more collateral than the position holds",
         };
         f.write_str(s)
     }

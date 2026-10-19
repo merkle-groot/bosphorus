@@ -4,6 +4,7 @@ members = [
     "core",
     "client",
     "cli",
+    "keeper",
     "programs/token/core",
     "programs/token/guest",
     "programs/oracle/core",

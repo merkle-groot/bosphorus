@@ -1167,6 +1167,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bosphorus-keeper"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bosphorus-client",
+ "bosphorus-core",
+ "clap",
+ "lee",
+ "tokio",
+]
+
+[[package]]
 name = "bosphorus-lending"
 version = "0.1.0"
 dependencies = [

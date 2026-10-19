@@ -139,6 +139,12 @@ impl Client {
         Ok(header)
     }
 
+    /// Errors unless the program at `id` runs `elf` (programs are immutable, so an instance
+    /// deployed by an older build rejects newer instructions).
+    pub async fn check_program(&self, id: AccountId, elf: &'static [u8]) -> Result<()> {
+        self.program(id, elf).await.map(drop)
+    }
+
     /// The program at `id`, checked against the bytecode we hold, for private txs.
     async fn program(&self, id: AccountId, elf: &'static [u8]) -> Result<ProgramWithDependencies> {
         let program = Program::new(Cow::Borrowed(elf))?;
