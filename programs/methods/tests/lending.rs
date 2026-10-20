@@ -162,6 +162,31 @@ fn admin_ops_need_the_admin() {
     assert_eq!(w.market().state.fee, WAD / 10);
 }
 
+/// Findings F1: a market's assets must run enabled bytecode behind an immutable header, or a
+/// malicious "token" could move the balances of anyone who signs a tx in that market.
+#[test]
+fn markets_only_take_enabled_immutable_asset_bytecode() {
+    let mut w = setup();
+    let token = w.chain.header(w.tka).image_id;
+    let as_ = |k: u8| vec![(addr(&key(k)), w.lending), (config_id(&w.lending), w.lending)];
+    assert!(w.lend(Instruction::EnableAsset { image_id: [7; 8] }, as_(MALLORY), &[&key(MALLORY)]).is_err(), "not the admin");
+
+    // Other bytecode (the oracle program) as collateral, claimed honestly or as the token's.
+    w.params.collateral_asset = w.oracle;
+    let oracle = w.chain.header(w.oracle).image_id;
+    assert!(w.create_market_claiming(vec![token, oracle]).is_err(), "bytecode not enabled");
+    assert!(w.create_market_claiming(vec![token, token]).is_err(), "claimed image doesn't match the header");
+
+    // The token's own bytecode behind a header that can still be updated.
+    let first = w.chain.header(w.tka).program_first_segment;
+    w.params.collateral_asset = w.chain.instance_with(first, &key(30), false);
+    assert!(w.create_market().is_err(), "mutable header");
+
+    // The native token needs no header.
+    w.params.collateral_asset = lee_core::native_token::NATIVE_TOKEN_PROGRAM_ID;
+    w.create_market().unwrap();
+}
+
 #[test]
 fn a_healthy_position_cant_be_liquidated() {
     let mut w = at_the_limit();

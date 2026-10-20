@@ -59,6 +59,7 @@ impl Keys {
             ("nullifier secret key", self.nsk().to_vec()),
             ("authorisation key", self.ask.0.to_vec()),
             ("viewing key seed", self.d.to_vec()),
+            ("viewing public key (first 32 bytes)", self.vpk().to_bytes()[..32].to_vec()),
         ]
     }
 }
@@ -78,7 +79,7 @@ impl PrivateAccount {
             vpk: self.keys.vpk(),
             random_seed: [7; 32],
             identifier: Identifier::ZERO,
-            kind: WitnessKind::Regular { ask: ask.then(|| self.keys.ask.clone()) },
+            kind: WitnessKind::Regular { ask: ask.then_some(self.keys.ask) },
             nullifier: NullifierWitness::Update {
                 account: self.account.clone(),
                 view_tag: 0,

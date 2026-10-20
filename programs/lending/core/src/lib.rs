@@ -14,16 +14,19 @@ pub use bosphorus_core::{
 };
 use lee_core::{
     account::{AccountId, ProgramShardSelector},
-    native_token,
+    native_token::{self, NATIVE_TOKEN_PROGRAM_ID},
     program::{ChainedCall, PdaSeed},
 };
 use risc0_zkvm::sha::{Impl, Sha256 as _};
 
 pub type MarketId = [u8; 32];
 pub type Salt = [u8; 32];
+/// A program's bytecode id, as in its loader header (`lee_core::program::ProgramId`).
+pub type ImageId = [u32; 8];
 
 pub const MAX_LLTVS: usize = 32;
 pub const MAX_IRMS: usize = 8;
+pub const MAX_ASSETS: usize = 16;
 
 /// Immutable per market; `market_id = SHA256(borsh(params))`.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -45,6 +48,18 @@ impl MarketParams {
     pub fn id(&self) -> MarketId {
         sha256(&borsh::to_vec(self).expect("borsh serialization is infallible"))
     }
+
+    /// The assets whose bytecode `create_market` checks: loan then collateral, without the native
+    /// token (built in) and without repeats. Each needs its header account in the tx.
+    pub fn checked_assets(&self) -> Vec<AccountId> {
+        let mut assets = vec![];
+        for asset in [self.loan_asset, self.collateral_asset] {
+            if asset != NATIVE_TOKEN_PROGRAM_ID && !assets.contains(&asset) {
+                assets.push(asset);
+            }
+        }
+        assets
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -54,6 +69,10 @@ pub struct Config {
     pub fee_recipient: AccountId,
     pub enabled_lltvs: Vec<u128>,
     pub enabled_irms: Vec<IrmParams>,
+    /// Token bytecode a market's assets may run (the native token is always allowed). On LEZ a
+    /// tx's signer is authorised in every program it reaches, so a malicious "token" could move
+    /// any balance of anyone who signs a tx in its market (findings F1).
+    pub enabled_assets: Vec<ImageId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -94,8 +113,11 @@ pub enum Instruction {
     SetFeeRecipient { fee_recipient: AccountId },
     /// `[admin (signs), config, market]`. Accrues at the old fee first.
     SetFee { params: MarketParams, fee: u128, window: Window },
-    /// `[config, market]`. Permissionless for enabled LLTVs and IRMs.
-    CreateMarket { params: MarketParams, window: Window },
+    /// `[config, market, header of each checked asset]` (`MarketParams::checked_assets`: loan, then
+    /// collateral, each a program's header account selecting the loader's shard). Permissionless
+    /// for enabled LLTVs and IRMs; `images` claims each asset's image id, which must be enabled
+    /// and its header immutable.
+    CreateMarket { params: MarketParams, window: Window, images: Vec<ImageId> },
     /// `[market, position, payer (signs), loan_vault]`. On behalf of any position.
     Supply { params: MarketParams, assets: u128, rs: Interval<u128>, window: Window },
     /// `[owner (signs), market, position, loan_vault, (to)]`.
@@ -128,12 +150,38 @@ pub enum Instruction {
     /// pending fee shares into the fee recipient's (zero-salt) position; the config checks
     /// `recipient` is the fee recipient.
     ClaimFees { params: MarketParams, recipient: AccountId, shares: u128 },
+    /// `[admin (signs), config]`. Lets markets use assets running this bytecode.
+    EnableAsset { image_id: ImageId },
+}
+
+impl Instruction {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Init { .. } => "init",
+            Self::EnableLltv { .. } => "enable_lltv",
+            Self::EnableIrm { .. } => "enable_irm",
+            Self::SetFeeRecipient { .. } => "set_fee_recipient",
+            Self::SetFee { .. } => "set_fee",
+            Self::CreateMarket { .. } => "create_market",
+            Self::Supply { .. } => "supply",
+            Self::Withdraw { .. } => "withdraw",
+            Self::SupplyCollateral { .. } => "supply_collateral",
+            Self::WithdrawCollateral { health: None, .. } => "withdraw_collateral_no_price",
+            Self::WithdrawCollateral { .. } => "withdraw_collateral",
+            Self::Borrow { .. } => "borrow",
+            Self::Repay { .. } => "repay",
+            Self::Liquidate { .. } => "liquidate",
+            Self::ClaimFees { .. } => "claim_fees",
+            Self::EnableAsset { .. } => "enable_asset",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum AdminOp {
     EnableLltv(u128),
     EnableIrm(IrmParams),
+    EnableAsset(ImageId),
     SetFeeRecipient(AccountId),
     /// Only check the signer (for `SetFee`, which writes the market).
     Check,
@@ -145,8 +193,10 @@ pub enum Effect {
     Init(Config),
     /// Config: the signer must be the admin.
     Admin { signer: AccountId, op: AdminOp },
-    /// Config (read only): the market's LLTV and IRM are enabled.
-    CheckEnabled { lltv: u128, irm: IrmParams },
+    /// Config (read only): the market's LLTV, IRM and asset bytecode are enabled.
+    CheckEnabled { lltv: u128, irm: IrmParams, images: Vec<ImageId> },
+    /// An asset's header (inspect, the loader's shard): runs `image_id` and can't be updated.
+    AssetHeader { image_id: ImageId },
     /// Config (read only): `recipient` is the fee recipient.
     CheckFeeRecipient { recipient: AccountId },
     /// Market: write once.

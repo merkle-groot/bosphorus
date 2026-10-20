@@ -1,5 +1,6 @@
 /target
 /.localnet
+/.testnet
 .DS_Store
 
 # Code only: progress docs, notes and agent instructions stay local.

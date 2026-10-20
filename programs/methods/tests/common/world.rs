@@ -9,6 +9,7 @@ use bosphorus_lending::{
 };
 use bosphorus_methods::{LENDING_ELF, ORACLE_ELF, TOKEN_ELF};
 use lee::{AccountId, PrivateKey};
+use lee_core::program::PROGRAM_LOADER_ACCOUNT_ID;
 
 use super::{Chain, addr, key};
 
@@ -41,7 +42,7 @@ pub fn irm() -> IrmParams {
 }
 
 /// TKA (collateral) and TKB (loan) minted to alice and bob, TKA/TKB = 2.5, lending initialised by
-/// the admin with LLTV 0.8 and one IRM, and a market created.
+/// the admin with LLTV 0.8, one IRM and the token bytecode, and a market created.
 pub fn setup() -> World {
     let mut chain = Chain::new();
     let tka = chain.deploy(TOKEN_ELF, &key(10));
@@ -79,7 +80,9 @@ pub fn setup() -> World {
     };
     let admin = vec![(addr(&key(ADMIN)), lending), (config, lending)];
     chain.call(lending, admin.clone(), &[&key(ADMIN)], Instruction::EnableLltv { lltv: params.lltv }).unwrap();
-    chain.call(lending, admin, &[&key(ADMIN)], Instruction::EnableIrm { irm: params.irm }).unwrap();
+    chain.call(lending, admin.clone(), &[&key(ADMIN)], Instruction::EnableIrm { irm: params.irm }).unwrap();
+    let image_id = chain.header(tka).image_id;
+    chain.call(lending, admin, &[&key(ADMIN)], Instruction::EnableAsset { image_id }).unwrap();
 
     let mut world = World { chain, tka, tkb, oracle, feed, lending, params };
     world.publish("2.5");
@@ -147,8 +150,16 @@ impl World {
     }
 
     pub fn create_market(&mut self) -> anyhow::Result<u64> {
-        let accounts = vec![(config_id(&self.lending), self.lending), (self.accounts().market, self.lending)];
-        self.lend(Instruction::CreateMarket { params: self.params.clone(), window: self.window() }, accounts, &[])
+        let images = self.params.checked_assets().iter().map(|a| self.chain.header(*a).image_id).collect();
+        self.create_market_claiming(images)
+    }
+
+    /// `create_market` with these claimed asset image ids (loan, then collateral).
+    pub fn create_market_claiming(&mut self, images: Vec<[u32; 8]>) -> anyhow::Result<u64> {
+        let mut accounts = vec![(config_id(&self.lending), self.lending), (self.accounts().market, self.lending)];
+        accounts.extend(self.params.checked_assets().into_iter().map(|a| (a, PROGRAM_LOADER_ACCOUNT_ID)));
+        let ix = Instruction::CreateMarket { params: self.params.clone(), window: self.window(), images };
+        self.lend(ix, accounts, &[])
     }
 
     pub fn supply(&mut self, payer: u8, position: AccountId, assets: u128) -> anyhow::Result<u64> {

@@ -20,12 +20,15 @@ pub use bosphorus_lending::{
 use bosphorus_lending::{config_id, position_id};
 use common::transaction::LeeTransaction;
 use hmac::{Hmac, Mac as _};
-use lee::{AccountId, ProgramShardSelector, program::Program};
-use lee_core::native_token::NATIVE_TOKEN_PROGRAM_ID;
+use lee::{
+    AccountId, ProgramShardSelector, privacy_preserving_transaction::circuit::ProgramWithDependencies, program::Program,
+};
+use lee_core::program::PROGRAM_LOADER_ACCOUNT_ID;
 use sequencer_service_rpc::RpcClient as _;
 use wallet::{AccDecodeData, AccountIdentity, AccountMention};
 
-use crate::{Client, Feed, Holder, LENDING_ELF, TOKEN_ELF, U256};
+pub use crate::now_ms;
+use crate::{Client, Feed, Holder, LENDING_ELF, ORACLE_ELF, TOKEN_ELF, U256};
 
 pub const PUBLIC_SALT: Salt = [0; 32];
 
@@ -130,9 +133,12 @@ impl ClaimConfig {
     }
 }
 
+/// For public txs: valid for 10 min, which outlasts all but the longest testnet stalls (13.7 h
+/// measured 2026-10-20: p99 gap 90 s, three of 5–10 min, one of 3.4 h; a public tx included after
+/// its window still pays, findings F3); room for 30 s of accrual by others.
 impl Default for ClaimConfig {
     fn default() -> Self {
-        Self { window_ms: 120_000, lag_ms: 2_000, ahead_ms: 30_000, ratio_width: WAD / 1_000_000_000, price_width: WAD / 200, t_grid_ms: 1 }
+        Self { window_ms: 600_000, lag_ms: 2_000, ahead_ms: 30_000, ratio_width: WAD / 1_000_000_000, price_width: WAD / 200, t_grid_ms: 1 }
     }
 }
 
@@ -195,10 +201,6 @@ fn zero_amount(ix: &Instruction) -> bool {
         Instruction::Withdraw { shares, .. } | Instruction::Repay { shares, .. } => *shares == 0,
         _ => false,
     }
-}
-
-pub fn now_ms() -> Result<u64> {
-    Ok(u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis())?)
 }
 
 pub fn parse_market_id(s: &str) -> Result<MarketId> {
@@ -310,32 +312,44 @@ impl Client {
 
     async fn send_lending(&self, lending: AccountId, accounts: Vec<AccountMention>, ix: Instruction, payer: Option<AccountId>) -> Result<()> {
         ensure!(!zero_amount(&ix), "zero amount");
-        self.send_public(lending, accounts, ix, payer).await
+        self.send_public(&format!("lending.{}", ix.name()), lending, accounts, ix, payer).await
+    }
+
+    /// `lending` and the market's assets, each checked to run this client's bytecode: a tx that
+    /// moves tokens runs the asset programs with the signer's authority over all its balances
+    /// (findings F1), and a private tx must be proven with exactly the deployed code.
+    async fn market_programs(&self, lending: AccountId, params: &MarketParams) -> Result<ProgramWithDependencies> {
+        let deps: Vec<_> = params.checked_assets().into_iter().map(|asset| (asset, TOKEN_ELF)).collect();
+        self.program_with(lending, LENDING_ELF, &deps).await
+    }
+
+    /// Errors unless the market's lending program, assets and oracle all run this client's
+    /// bytecode. A keeper checks this before acting on a market it discovered (findings F1).
+    pub async fn check_market_code(&self, lending: AccountId, params: &MarketParams) -> Result<()> {
+        self.market_programs(lending, params).await?;
+        self.check_program(params.oracle_program, ORACLE_ELF).await
     }
 
     /// Sends a public tx, or a private one if any account is private (proven here; fee-exempt).
     async fn send_op(&mut self, lending: AccountId, params: &MarketParams, accounts: Accounts, ix: Instruction, payer: Option<AccountId>) -> Result<()> {
+        ensure!(!zero_amount(&ix), "zero amount");
+        let program = self.market_programs(lending, params).await?;
         if accounts.private.is_empty() {
             return self.send_lending(lending, accounts.mentions, ix, payer).await;
         }
-        ensure!(!zero_amount(&ix), "zero amount");
-        let mut deps = vec![];
-        for asset in [params.loan_asset, params.collateral_asset] {
-            if asset != NATIVE_TOKEN_PROGRAM_ID && !deps.iter().any(|(id, _)| *id == asset) {
-                deps.push((asset, TOKEN_ELF));
-            }
-        }
-        let program = self.program_with(lending, LENDING_ELF, &deps).await?;
+        let label = format!("lending.{}", ix.name());
         let data = Program::serialize_instruction(ix)?;
-        let started = std::time::Instant::now();
+        let started = now_ms()?;
         let (hash, secrets) = self
             .wallet
             .send_privacy_preserving_tx(accounts.mentions, data, &program)
             .await
             .map_err(|e| anyhow!("{e:?}"))?;
-        eprintln!("private tx {hash} proved and sent in {:.1?}", started.elapsed());
+        let submitted = now_ms()?;
+        eprintln!("private tx {hash} proved and sent in {:.1} s", (submitted - started) as f64 / 1000.0);
         let (tx, block) = self.wallet.poll_transaction(hash).await.context("private tx not included (a claim failed at settlement?)")?;
         eprintln!("tx {hash} included in block {block}");
+        self.measure(&label, "private", hash, submitted, Some(submitted - started), block, None).await;
         let LeeTransaction::PrivacyPreserving(tx) = tx else { bail!("expected a private tx") };
         ensure!(secrets.len() == accounts.private.len(), "{} shared secrets for {} private accounts", secrets.len(), accounts.private.len());
         let decode: Vec<_> = secrets.into_iter().zip(accounts.private).map(|(secret, id)| AccDecodeData::Decode(secret, id)).collect();
@@ -414,12 +428,20 @@ impl Client {
 
     // ---- markets and positions ---------------------------------------------------------------
 
+    /// The assets' image ids are read from their headers; the config must have enabled them.
     pub async fn create_market(&self, lending: AccountId, params: MarketParams, cfg: &ClaimConfig, payer: AccountId) -> Result<MarketId> {
         let id = params.id();
         let window = Window { t: now_ms()?.saturating_sub(cfg.lag_ms), w: cfg.window_ms };
-        let accounts = vec![read(config_id(&lending), lending), read(MarketAccounts::new(&lending, &id).market, lending)];
-        self.send_lending(lending, accounts, Instruction::CreateMarket { params, window }, Some(payer)).await?;
-        self.market(lending, &id).await.context("create_market didn't apply (LLTV and IRM enabled? already exists?)")?;
+        let mut accounts = vec![read(config_id(&lending), lending), read(MarketAccounts::new(&lending, &id).market, lending)];
+        let mut images = vec![];
+        for asset in params.checked_assets() {
+            images.push(self.header(asset).await?.image_id);
+            accounts.push(read(asset, PROGRAM_LOADER_ACCOUNT_ID));
+        }
+        self.send_lending(lending, accounts, Instruction::CreateMarket { params, window, images }, Some(payer)).await?;
+        self.market(lending, &id)
+            .await
+            .context("create_market didn't apply (LLTV, IRM and asset bytecode enabled? already exists?)")?;
         Ok(id)
     }
 
@@ -546,6 +568,7 @@ impl Client {
         let Some(before) = self.position(lending, position).await? else { return Ok(None) };
         let Some(q) = quote_liquidation(&market, &before, &feed, &on.claims, now_ms()?)? else { return Ok(None) };
         let (m, params) = (on.accounts(), &market.params);
+        self.market_programs(lending, params).await?;
         let balance = self.token_balance(params.loan_asset, crate::Holder::Public(liquidator)).await?;
         ensure!(balance >= q.liquidation.repaid_assets, "liquidator holds {balance}, needs {}", q.liquidation.repaid_assets);
         let mut accounts = vec![

@@ -57,11 +57,12 @@ await_liquidation() {
 START=$(last_block)
 IRM=(--base 2% --slope1 10% --slope2 100% --kink 80%)
 # Programs are immutable: Phase 2's instance predates `Liquidate`, so deploy this build's.
-step "lending: deploy, init, enable LLTV 80% and the IRM"
+step "lending: deploy, init, enable LLTV 80%, the IRM and the token bytecode"
 LENDING=$(bos lending deploy --payer $PAYER)
 bos lending init --lending "$LENDING" --admin $PAYER --fee-recipient $PAYER --payer $PAYER > /dev/null
 bos lending enable-lltv --lending "$LENDING" --admin $PAYER --lltv 80% > /dev/null
 bos lending enable-irm --lending "$LENDING" --admin $PAYER "${IRM[@]}" > /dev/null
+bos lending enable-asset --lending "$LENDING" --admin $PAYER --of "$TKA" > /dev/null # token bytecode (TKA and TKB share it)
 echo "lending $LENDING" >&2
 
 step "new market (TKB loan, TKA collateral, LLTV 80%, 2–112% APR, 10% fee)"
@@ -96,7 +97,7 @@ bos market supply-collateral "${ON[@]}" --from "$BOB" --assets 100000000000 > /d
 bos market borrow "${ON[@]}" --owner "$BOB" --assets 150000000000 > /dev/null
 
 step "start the keeper (scanning from block $START)"
-"$KEEPER_BIN" --lending "$LENDING" --liquidator "$KEEPER" --interval 5 --from-block "$START" > "$KEEPER_LOG" 2>&1 &
+"$KEEPER_BIN" --lending "$LENDING" --liquidator "$KEEPER" --publisher $PAYER --interval 5 --from-block "$START" > "$KEEPER_LOG" 2>&1 &
 KEEPER_PID=$!
 trap 'kill $KEEPER_PID 2> /dev/null || true' EXIT
 sleep 30

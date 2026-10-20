@@ -141,7 +141,7 @@ fn trial(
 }
 
 #[test]
-#[ignore = "experiment: prints a landing table (a few minutes)"]
+#[ignore = "experiment: prints a landing table (~35 min)"]
 fn landing_rate_vs_claim_width() {
     assert!(std::env::var("RISC0_DEV_MODE").is_ok(), "run with RISC0_DEV_MODE=1");
     let trials: usize = env("LANDING_TRIALS", 40);

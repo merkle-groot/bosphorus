@@ -55,11 +55,12 @@ private_op() {
 
 START=$(last_block)
 IRM=(--base 2% --slope1 10% --slope2 100% --kink 80%)
-step "lending: deploy, init, enable LLTV 80% and the IRM; create the market"
+step "lending: deploy, init, enable LLTV 80%, the IRM and the token bytecode; create the market"
 LENDING=$(bos lending deploy --payer $PAYER)
 bos lending init --lending "$LENDING" --admin $PAYER --fee-recipient $PAYER --payer $PAYER > /dev/null
 bos lending enable-lltv --lending "$LENDING" --admin $PAYER --lltv 80% > /dev/null
 bos lending enable-irm --lending "$LENDING" --admin $PAYER "${IRM[@]}" > /dev/null
+bos lending enable-asset --lending "$LENDING" --admin $PAYER --of "$TKA" > /dev/null # token bytecode (TKA and TKB share it)
 MARKET=$(bos market create --lending "$LENDING" --loan "$TKB" --collateral "$TKA" --oracle "$ORACLE" \
   --feed "$FEED" --lltv 80% "${IRM[@]}" --max-price-age 3600 --payer $PAYER)
 ON=(--lending "$LENDING" --market "$MARKET" --payer $PAYER)
@@ -114,7 +115,7 @@ step "the public keeper (knows nothing of the owner) watches from block $START"
 KEEPER=$(new_account public Public)
 bos token mint --token "$TKB" --authority $PAYER --to "$KEEPER" --amount 1000000000000 > /dev/null
 "$W" auth-transfer send --from $PAYER --to "$KEEPER" --amount 1000000000 < /dev/null > /dev/null
-"$KEEPER_BIN" --lending "$LENDING" --liquidator "$KEEPER" --interval 5 --from-block "$START" > "$KEEPER_LOG" 2>&1 &
+"$KEEPER_BIN" --lending "$LENDING" --liquidator "$KEEPER" --publisher $PAYER --interval 5 --from-block "$START" > "$KEEPER_LOG" 2>&1 &
 KEEPER_PID=$!
 trap 'kill $KEEPER_PID 2> /dev/null || true' EXIT
 sleep 20

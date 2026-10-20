@@ -9,8 +9,9 @@ use risc0_zkvm::sha::{Impl, Sha256 as _};
 
 pub use bosphorus_core::U256;
 /// `Publish` sets the window `[timestamp, timestamp + PUBLISH_WINDOW_MS)`: a publisher can't
-/// post-date a price, and a delayed publish expires.
-pub const PUBLISH_WINDOW_MS: u64 = 60_000;
+/// post-date a price, and a delayed publish expires. 10 min outlasts all but the longest testnet
+/// stalls (findings F3); a late publish still carries its own timestamp, so lending sees its real age.
+pub const PUBLISH_WINDOW_MS: u64 = 10 * 60_000;
 pub const MAX_NAME_LEN: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]

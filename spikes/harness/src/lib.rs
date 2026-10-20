@@ -92,7 +92,7 @@ impl Keys {
             vpk: self.vpk(),
             random_seed: [7; 32],
             identifier: Identifier::ZERO,
-            kind: WitnessKind::Regular { ask: ask.then(|| self.ask.clone()) },
+            kind: WitnessKind::Regular { ask: ask.then_some(self.ask) },
             nullifier: NullifierWitness::Update {
                 account: account.clone(),
                 view_tag: 0,

@@ -26,11 +26,12 @@ new_account() { "$W" account new "$1" < /dev/null | grep -o "$2/[1-9A-HJ-NP-Za-k
 
 IRM=(--base 100% --slope1 400% --slope2 3000% --kink 80%) # steep, so 30 s of interest shows
 
-step "lending: deploy, init, enable LLTV 80% and the IRM"
+step "lending: deploy, init, enable LLTV 80%, the IRM and the token bytecode"
 LENDING=$(bos lending deploy --payer $PAYER)
 bos lending init --lending "$LENDING" --admin $PAYER --fee-recipient $PAYER --payer $PAYER > /dev/null
 bos lending enable-lltv --lending "$LENDING" --admin $PAYER --lltv 80% > /dev/null
 bos lending enable-irm --lending "$LENDING" --admin $PAYER "${IRM[@]}" > /dev/null
+bos lending enable-asset --lending "$LENDING" --admin $PAYER --of "$TKA" > /dev/null # token bytecode (TKA and TKB share it)
 echo "lending $LENDING" >&2
 
 step "create market: TKB loan, TKA collateral, TKA/TKB feed"

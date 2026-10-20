@@ -4,14 +4,17 @@
 
 use bosphorus_core::{claims, validate_lltv};
 use bosphorus_lending::{
-    AdminOp, Config, Effect, Event, HealthClaim, Instruction, MAX_IRMS, MAX_LLTVS, Market, MarketAccounts, MarketId,
-    MarketOp, MarketParams, MarketState, Position, PositionOp, Salt, Shard, Window, collateral_vault_seed, config_id,
-    loan_vault_seed, position_id, transfer,
+    AdminOp, Config, Effect, Event, HealthClaim, Instruction, MAX_ASSETS, MAX_IRMS, MAX_LLTVS, Market, MarketAccounts,
+    MarketId, MarketOp, MarketParams, MarketState, Position, PositionOp, Salt, Shard, Window, collateral_vault_seed,
+    config_id, loan_vault_seed, position_id, transfer,
 };
 use bosphorus_oracle::Feed;
 use lee_core::{
     account::AccountId,
-    program::{AccountMeta, Plan, PlanInput, ProgramEvent, TimestampValidityWindow, run_program},
+    program::{
+        AccountMeta, PROGRAM_LOADER_ACCOUNT_ID, Plan, PlanInput, ProgramEvent, ProgramHeader, TimestampValidityWindow,
+        run_program,
+    },
 };
 
 fn main() {
@@ -83,7 +86,8 @@ fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             assert_eq!(instance.account_id, *this, "first account must be this program's header");
             assert!(instance.is_authorized, "the header account must sign init");
             assert_eq!(config.account_id, config_id(this), "wrong config account");
-            let config_data = Config { admin, fee_recipient, enabled_lltvs: vec![], enabled_irms: vec![] };
+            let config_data =
+                Config { admin, fee_recipient, enabled_lltvs: vec![], enabled_irms: vec![], enabled_assets: vec![] };
             plan.effect(config, &Effect::Init(config_data));
         }
         Instruction::EnableLltv { lltv } => {
@@ -97,6 +101,9 @@ fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
         Instruction::SetFeeRecipient { fee_recipient } => {
             admin(&mut plan, this, accounts, AdminOp::SetFeeRecipient(fee_recipient));
         }
+        Instruction::EnableAsset { image_id } => {
+            admin(&mut plan, this, accounts, AdminOp::EnableAsset(image_id));
+        }
         Instruction::SetFee { params, fee, window: w } => {
             let [admin_account, config, market_account] = accounts else { panic!("takes [admin, config, market]") };
             admin(&mut plan, this, &[admin_account.clone(), config.clone()], AdminOp::Check);
@@ -104,14 +111,24 @@ fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             plan.effect(market_account, &Effect::Market { t: w.t, op: MarketOp::SetFee { fee } });
             window(&mut plan, w);
         }
-        Instruction::CreateMarket { params, window: w } => {
-            let [config, market_account] = accounts else { panic!("takes [config, market]") };
+        Instruction::CreateMarket { params, window: w, images } => {
+            let [config, market_account, headers @ ..] = accounts else {
+                panic!("takes [config, market, header of each checked asset]")
+            };
             ok(validate_lltv(params.lltv));
             ok(params.irm.validate());
             assert!(params.max_price_age > 0, "max_price_age must be positive");
             assert_eq!(config.account_id, config_id(this), "wrong config account");
             let (market_id, _) = market(this, &params, market_account);
-            plan.effect(config, &Effect::CheckEnabled { lltv: params.lltv, irm: params.irm });
+            // Each non-native asset runs enabled, immutable bytecode: its header shows the image id
+            // the config checks (findings F1).
+            let assets = params.checked_assets();
+            assert!(headers.len() == assets.len() && images.len() == assets.len(), "one header and image per checked asset");
+            for ((asset, header), image_id) in assets.iter().zip(headers).zip(&images) {
+                assert_eq!(header.account_id, *asset, "wrong asset header");
+                plan.inspect(header, PROGRAM_LOADER_ACCOUNT_ID, &Effect::AssetHeader { image_id: *image_id });
+            }
+            plan.effect(config, &Effect::CheckEnabled { lltv: params.lltv, irm: params.irm, images });
             plan.effect(market_account, &Effect::CreateMarket { params: params.clone(), t: w.t });
             window(&mut plan, w);
             event(&mut plan, Event::MarketCreated { market_id, params });
@@ -296,15 +313,27 @@ fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                     assert!(config.enabled_irms.len() < MAX_IRMS, "too many IRMs");
                     config.enabled_irms.push(irm);
                 }
+                AdminOp::EnableAsset(image_id) => {
+                    assert!(!config.enabled_assets.contains(&image_id), "already enabled");
+                    assert!(config.enabled_assets.len() < MAX_ASSETS, "too many assets");
+                    config.enabled_assets.push(image_id);
+                }
                 AdminOp::SetFeeRecipient(recipient) => config.fee_recipient = recipient,
                 AdminOp::Check => return None,
             }
             encode(Shard::Config(config))
         }
-        Effect::CheckEnabled { lltv, irm } => {
+        Effect::CheckEnabled { lltv, irm, images } => {
             let config = config(pre_data);
             assert!(config.enabled_lltvs.contains(&lltv), "LLTV not enabled");
             assert!(config.enabled_irms.contains(&irm), "IRM not enabled");
+            assert!(images.iter().all(|i| config.enabled_assets.contains(i)), "asset bytecode not enabled");
+            None
+        }
+        Effect::AssetHeader { image_id } => {
+            let header = ProgramHeader::from_bytes(pre_data).expect("asset has no program header");
+            assert_eq!(header.image_id, image_id, "asset runs other bytecode than claimed");
+            assert!(header.immutable, "asset program can be updated");
             None
         }
         Effect::CheckFeeRecipient { recipient } => {

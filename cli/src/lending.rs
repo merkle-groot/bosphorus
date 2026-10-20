@@ -16,11 +16,11 @@ fn wad(s: &str) -> Result<u128> {
     parse_wad(s).with_context(|| format!("bad decimal or percentage: {s}"))
 }
 
-/// Phase 2 is public mode; private owners come in Phase 4.
+/// Roles that only work as signing public accounts: admin, liquidator.
 fn public(h: Holder) -> Result<lee::AccountId> {
     match h {
         Holder::Public(id) => Ok(id),
-        Holder::Private(_) => bail!("private accounts in lending are Phase 4; use a Public/ account"),
+        Holder::Private(_) => bail!("this role needs a Public/ account"),
     }
 }
 
@@ -48,7 +48,7 @@ impl Irm {
 
 #[derive(Args, Clone)]
 pub struct ClaimArgs {
-    /// Validity window of the tx, seconds [default: 120 public, 1200 private].
+    /// Validity window of the tx, seconds [default: 600 public, 1200 private].
     #[arg(long)]
     window: Option<u64>,
     /// How far ahead (seconds) ratio claims allow other txs to accrue the market before ours lands
@@ -120,6 +120,17 @@ pub enum Admin {
         #[arg(long)]
         payer: Option<Holder>,
     },
+    /// Let markets use assets running the bytecode of program `of` (e.g. a token instance).
+    EnableAsset {
+        #[arg(long)]
+        lending: Holder,
+        #[arg(long)]
+        admin: Holder,
+        #[arg(long)]
+        of: Holder,
+        #[arg(long)]
+        payer: Option<Holder>,
+    },
     SetFeeRecipient {
         #[arg(long)]
         lending: Holder,
@@ -171,7 +182,7 @@ impl MarketArgs {
 
 #[derive(Subcommand)]
 pub enum MarketCmd {
-    /// Create a market (permissionless for enabled LLTVs and IRMs). Prints the market id.
+    /// Create a market (permissionless for enabled LLTVs, IRMs and asset bytecode). Prints the market id.
     Create {
         #[arg(long)]
         lending: Holder,
@@ -366,6 +377,11 @@ pub async fn admin(client: &Client, cmd: Admin) -> Result<()> {
             let config = ix_admin(client, lending, admin, Instruction::EnableIrm { irm: irm.params() }, payer).await?;
             println!("{} IRMs enabled", config.enabled_irms.len());
         }
+        Admin::EnableAsset { lending, admin, of, payer } => {
+            let image_id = client.header(of.id()).await?.image_id;
+            let config = ix_admin(client, lending, admin, Instruction::EnableAsset { image_id }, payer).await?;
+            println!("{} asset bytecodes enabled", config.enabled_assets.len());
+        }
         Admin::SetFeeRecipient { lending, admin, fee_recipient, payer } => {
             let ix = Instruction::SetFeeRecipient { fee_recipient: fee_recipient.id() };
             let config = ix_admin(client, lending, admin, ix, payer).await?;
@@ -384,6 +400,9 @@ pub async fn admin(client: &Client, cmd: Admin) -> Result<()> {
             }
             for irm in &config.enabled_irms {
                 println!("irm {}", describe_irm(irm));
+            }
+            for image_id in &config.enabled_assets {
+                println!("asset bytecode {}", bosphorus_client::hex_id(image_id));
             }
         }
     }

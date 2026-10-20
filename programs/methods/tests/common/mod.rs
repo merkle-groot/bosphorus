@@ -56,13 +56,18 @@ impl Chain {
 
     /// Another instance on segments that are already uploaded (S5).
     pub fn instance(&mut self, first_segment: AccountId, owner: &PrivateKey) -> AccountId {
+        self.instance_with(first_segment, owner, true)
+    }
+
+    /// An instance whose header is mutable unless `immutable` (it could be pointed at new bytecode).
+    pub fn instance_with(&mut self, first_segment: AccountId, owner: &PrivateKey, immutable: bool) -> AccountId {
         let mut selectors = vec![addr(owner)];
         selectors.extend(self.chain(first_segment));
         self.call(
             PROGRAM_LOADER_ACCOUNT_ID,
             selectors.into_iter().map(|id| (id, PROGRAM_LOADER_ACCOUNT_ID)).collect(),
             &[owner],
-            LoaderInstruction::CreateHeader { first_segment, immutable: true },
+            LoaderInstruction::CreateHeader { first_segment, immutable },
         )
         .expect("create header");
         addr(owner)
