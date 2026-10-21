@@ -54,6 +54,18 @@ fn owned(this: &AccountId, id: &MarketId, owner: &AccountMeta, position: &Accoun
     );
 }
 
+/// Owned, or held on the owner's own account (E9: a lender keeps its shares in `shard[lending]` of
+/// its private account; only `lending` writes that shard, constraints §1). Never for `Borrow`: the
+/// holder of a private account's keys can re-version it, so held debt couldn't be liquidated
+/// (Option 2 §2). Held accounts carry no debt, so withdrawals from them can't hurt anyone.
+fn owned_or_held(this: &AccountId, id: &MarketId, owner: &AccountMeta, position: &AccountMeta, salt: &Salt) {
+    if position.account_id == owner.account_id {
+        assert!(owner.is_authorized, "owner must authorise");
+    } else {
+        owned(this, id, owner, position, salt);
+    }
+}
+
 /// Optional trailing payout account; defaults to the owner.
 fn payout(owner: &AccountMeta, rest: &[AccountMeta]) -> AccountId {
     match rest {
@@ -151,7 +163,7 @@ fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
                 panic!("takes [owner, market, position, loan_vault, (to)]")
             };
             let (market_id, m) = market(this, &params, market_account);
-            owned(this, &market_id, owner, position, &salt);
+            owned_or_held(this, &market_id, owner, position, &salt);
             assert_eq!(loan_vault.account_id, m.loan_vault, "wrong loan vault");
             let assets = ok(claims::withdraw_assets(shares, &rs));
             plan.effect(market_account, &Effect::Market { t: w.t, op: MarketOp::Withdraw { rs, shares, assets } });
@@ -189,7 +201,7 @@ fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
                 (Some(_), _) => panic!("takes [owner, market, position, feed, collateral_vault, (to)]"),
                 (None, _) => panic!("takes [owner, position, collateral_vault, (to)]"),
             };
-            owned(this, &market_id, owner, position, &salt);
+            owned_or_held(this, &market_id, owner, position, &salt);
             assert_eq!(collateral_vault.account_id, m.collateral_vault, "wrong collateral vault");
             let health = health.map(|claim| ok(claims::health(&claim.price, &claim.rb, params.lltv)));
             plan.effect(position, &Effect::Position { market_id, op: PositionOp::WithdrawCollateral { assets, health } });

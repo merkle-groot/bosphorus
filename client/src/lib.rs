@@ -106,6 +106,13 @@ impl Client {
         payer: Option<AccountId>,
     ) -> Result<()> {
         let data = Program::serialize_instruction(instruction)?;
+        let signer = accounts.iter().find_map(|m| match m.identity {
+            AccountIdentity::Public(id) => Some(id),
+            _ => None,
+        });
+        if let Some(payer) = payer.or(signer) {
+            self.check_payer(payer).await?;
+        }
         let balance_before = match payer {
             Some(payer) => Some(self.native_balance(payer).await?),
             None => None,

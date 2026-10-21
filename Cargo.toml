@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "core",
     "client",
+    "app",
     "cli",
     "keeper",
     "programs/token/core",

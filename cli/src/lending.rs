@@ -1,11 +1,11 @@
 //! `bos lending …`, `bos market …`, `bos status`. Amounts are base units; rates and LLTVs are
 //! decimals or percentages ("0.8", "80%"). Each command prints its main result on the last line.
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 use bosphorus_client::{
     Client, Holder,
     lending::{
-        ClaimConfig, Instruction, IrmParams, MarketId, MarketParams, On, Scanner, market_id_hex, market_status,
+        ClaimConfig, Instruction, IrmParams, MarketId, MarketParams, On, Owner, Scanner, market_id_hex, market_status,
         now_ms, parse_market_id, position_status,
     },
 };
@@ -222,6 +222,9 @@ pub enum MarketCmd {
         /// Which of a private owner's positions in this market (salt index).
         #[arg(long, default_value_t = 0)]
         index: u32,
+        /// E9: the shares sit on the owner's own (private) account, with no public position.
+        #[arg(long, conflicts_with = "index")]
+        held: bool,
         #[arg(long)]
         assets: u128,
         #[command(flatten)]
@@ -235,6 +238,9 @@ pub enum MarketCmd {
         owner: Holder,
         #[arg(long, default_value_t = 0)]
         index: u32,
+        /// E9: the shares sit on the owner's own (private) account, with no public position.
+        #[arg(long, conflicts_with = "index")]
+        held: bool,
         #[arg(long, required_unless_present = "all")]
         shares: Option<u128>,
         #[arg(long)]
@@ -346,6 +352,13 @@ pub struct Status {
     owner: Option<Holder>,
     #[arg(long, default_value_t = 0)]
     index: u32,
+    /// E9: the owner's shares held on its own account.
+    #[arg(long, conflicts_with = "index")]
+    held: bool,
+}
+
+fn owner_of(client: &Client, holder: Holder, market: &MarketId, index: u32, held: bool) -> Result<Owner> {
+    if held { Ok(Owner::held(holder)) } else { client.owner(holder, market, index) }
 }
 
 fn payer(p: Option<Holder>) -> Option<lee::AccountId> {
@@ -444,14 +457,15 @@ pub async fn market(client: &mut Client, cmd: MarketCmd) -> Result<()> {
                 );
             }
         }
-        MarketCmd::Supply { on, from, owner, index, assets, claims } => {
+        MarketCmd::Supply { on, from, owner, index, held, assets, claims } => {
             let on = on.on(claims.config(private(&[Some(from), owner])));
-            let owner = client.owner(owner.unwrap_or(from), &on.market, index)?;
+            ensure!(!held || owner.is_none_or(|o| o == from), "--held supplies into --from's own account");
+            let owner = owner_of(client, owner.unwrap_or(from), &on.market, index, held)?;
             println!("{}", client.supply(&on, from, on.position(&owner), assets).await?);
         }
-        MarketCmd::Withdraw { on, owner, index, shares, all, to, claims } => {
+        MarketCmd::Withdraw { on, owner, index, held, shares, all, to, claims } => {
             let on = on.on(claims.config(private(&[Some(owner), to])));
-            let owner = client.owner(owner, &on.market, index)?;
+            let owner = owner_of(client, owner, &on.market, index, held)?;
             let shares = match shares {
                 Some(shares) if !all => shares,
                 _ => client.position_shares(on.lending, on.position(&owner)).await?.supply_shares,
@@ -544,7 +558,7 @@ pub async fn status(client: &Client, cmd: Status) -> Result<()> {
     println!("  price {} (1e36 scale), {age} s old, round {}", feed.price, feed.round);
     if let Some(owner) = cmd.owner {
         let on = On { lending, market: cmd.market, claims: ClaimConfig::default(), payer: None };
-        let position = on.position(&client.owner(owner, &cmd.market, cmd.index)?);
+        let position = on.position(&owner_of(client, owner, &cmd.market, cmd.index, cmd.held)?);
         let Some(pos) = client.position(lending, position).await? else {
             println!("position {position}: empty");
             return Ok(());

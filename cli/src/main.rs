@@ -171,9 +171,18 @@ enum Oracle {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let command = Cli::parse().command;
+fn main() -> Result<()> {
+    if std::env::var_os("RISC0_KECCAK_PO2").is_none() {
+        // The circuit's keccak proof is 2^po2 rows however few permutations it holds, and risc0's
+        // default po2 17 is mostly padding: a private account written costs ~65 permutations, and
+        // po2 14 holds 81. Host-side only (any po2 in 14..=18 verifies). ~40 s off a private op.
+        // SAFETY: still single-threaded; the runtime starts below.
+        unsafe { std::env::set_var("RISC0_KECCAK_PO2", "14") };
+    }
+    tokio::runtime::Runtime::new()?.block_on(run(Cli::parse().command))
+}
+
+async fn run(command: Command) -> Result<()> {
     if let Command::Programs { write_dir } = &command {
         // No wallet needed.
         for (name, elf) in [("token", TOKEN_ELF), ("oracle", ORACLE_ELF), ("lending", LENDING_ELF)] {

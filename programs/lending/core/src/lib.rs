@@ -118,16 +118,18 @@ pub enum Instruction {
     /// for enabled LLTVs and IRMs; `images` claims each asset's image id, which must be enabled
     /// and its header immutable.
     CreateMarket { params: MarketParams, window: Window, images: Vec<ImageId> },
-    /// `[market, position, payer (signs), loan_vault]`. On behalf of any position.
+    /// `[market, position, payer (signs), loan_vault]`. On behalf of any position, or into any
+    /// account: a lender may hold its shares in its own (private) account (E9).
     Supply { params: MarketParams, assets: u128, rs: Interval<u128>, window: Window },
-    /// `[owner (signs), market, position, loan_vault, (to)]`.
+    /// `[owner (signs), market, position, loan_vault, (to)]`. `position` may be the owner's own
+    /// account (shares held there, E9; `salt` unused).
     Withdraw { params: MarketParams, shares: u128, salt: Salt, rs: Interval<u128>, window: Window },
     /// `[position, payer (signs), collateral_vault]`. On behalf of any position; the market isn't
     /// touched, so the client checks it exists.
     SupplyCollateral { params: MarketParams, assets: u128 },
     /// With `health`: `[owner (signs), market, position, feed, collateral_vault, (to)]`.
     /// Without: `[owner (signs), position, collateral_vault, (to)]`, and the position must hold no
-    /// debt (so a dead oracle can't lock debt-free collateral).
+    /// debt (so a dead oracle can't lock debt-free collateral). `position` may be the owner's own account.
     WithdrawCollateral { params: MarketParams, assets: u128, salt: Salt, health: Option<HealthClaim> },
     /// `[owner (signs), market, position, feed, loan_vault, (to)]`.
     Borrow { params: MarketParams, assets: u128, salt: Salt, health: HealthClaim },

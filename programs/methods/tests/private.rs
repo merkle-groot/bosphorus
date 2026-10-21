@@ -2,6 +2,8 @@
 //! a private owner opens a salted position, borrows to its private account, repays from it and
 //! withdraws the collateral back to it; no published byte identifies the owner or the salt.
 //!
+//! E9: a private lender holds its supply shares in its own private account, leaving no public position.
+//!
 //! Dev-mode proofs: `RISC0_DEV_MODE=1 cargo test -p bosphorus-methods --release --test private`.
 //! Real proofs, timed (plan 4.4, ~40 min on an M1):
 //! `cargo test -p bosphorus-methods --release --test private -- --ignored --nocapture real_proofs`.
@@ -11,14 +13,14 @@ mod common;
 use std::time::Instant;
 
 use bosphorus_core::claims;
-use bosphorus_lending::{Instruction, Interval, Salt, U256, position_id};
+use bosphorus_lending::{Instruction, Interval, MarketId, Position, Salt, Shard, U256, position_id};
 use bosphorus_methods::{LENDING_ELF, TOKEN_ELF};
 use common::{
     private::{Keys, PrivateAccount},
-    world::{BOB, World, setup},
+    world::{ALICE, BOB, World, setup},
 };
 use lee::{AccountId, PrivacyPreservingTransaction};
-use lee_core::native_token::encode_balance;
+use lee_core::{NullifierWitness, account::ShardData, native_token::encode_balance};
 
 const SALT: Salt = [0x5A; 32];
 const COLLATERAL: u128 = 1_000_000;
@@ -85,12 +87,82 @@ impl Private {
         }
         let public: Vec<_> = tx.message.public_actions.iter().map(|a| a.account_id).collect();
         assert!(!public.contains(&self.owner.keys.id()), "owner listed as a public account");
-        assert!(public.contains(&self.position), "the position is the one public trace of the owner");
+        if self.position == self.owner.keys.id() {
+            // E9: a held position leaves no public trace, only the market and its vaults.
+            let m = self.w.accounts();
+            let market = [m.market, m.loan_vault, m.collateral_vault];
+            assert!(public.iter().all(|a| market.contains(a)), "a held op touched {public:?}");
+        } else {
+            assert!(public.contains(&self.position), "the position is the one public trace of the owner");
+        }
     }
 
     fn balance(&self, token: AccountId) -> u128 {
         bosphorus_token::decode_balance(self.owner.account.data.shard(token)).unwrap()
     }
+}
+
+/// `shard[lending]` of an account holding `shares` of a market (E9).
+fn held(market: MarketId, supply_shares: u128, collateral: u128) -> ShardData {
+    let position = Position { market_id: market, supply_shares, collateral, ..Position::default() };
+    borsh::to_vec(&Shard::Position(position)).unwrap().try_into().unwrap()
+}
+
+/// E9: the lender's own private account is its position.
+fn private_lender() -> Private {
+    let mut p = private_world();
+    p.position = p.owner.keys.id();
+    p
+}
+
+/// E9: supply from the private account into itself; `shard[lending]` ends up on it.
+fn held_supply(p: &mut Private, assets: u128) -> u128 {
+    let (l, m, lender, tkb) = (p.w.lending, p.w.accounts(), p.owner.keys.id(), p.w.tkb);
+    let rs = p.w.ratios().0;
+    let shares = claims::supply_shares(assets, &rs).unwrap();
+    let ix = Instruction::Supply { params: p.w.params.clone(), assets, rs, window: p.w.window() };
+    let tx = p.op("held_supply", vec![(m.market, l), (lender, l), (lender, tkb), (m.loan_vault, tkb)], ix).unwrap();
+    let (market, tkb_before) = (p.w.params.id(), p.balance(tkb));
+    p.owner.advance(&tx, |a| {
+        a.data.set_shard(tkb, encode_balance(tkb_before - assets));
+        a.data.set_shard(l, held(market, shares, 0));
+    });
+    shares
+}
+
+/// E9: withdraw held shares back to the holder's account: `(selectors, instruction, assets)`.
+fn held_withdraw(p: &Private, shares: u128) -> (Vec<(AccountId, AccountId)>, Instruction, u128) {
+    let (l, m, tkb, lender) = (p.w.lending, p.w.accounts(), p.w.tkb, p.owner.keys.id());
+    let rs = p.w.ratios().0;
+    let assets = claims::withdraw_assets(shares, &rs).unwrap();
+    let ix = Instruction::Withdraw { params: p.w.params.clone(), shares, salt: [0; 32], rs, window: p.w.window() };
+    (vec![(lender, tkb), (m.market, l), (p.position, l), (m.loan_vault, tkb)], ix, assets)
+}
+
+/// E9: a private lender supplies into its own account, a public borrower pays a day of interest,
+/// and the lender withdraws everything back to the same account. Nothing public names a position.
+fn held_lifecycle(p: &mut Private) {
+    let (l, tkb, market) = (p.w.lending, p.w.tkb, p.w.params.id());
+    let supplied = 100_000;
+    let total_before = p.w.market().state.total_supply_shares;
+    let shares = held_supply(p, supplied);
+    assert_eq!(p.w.market().state.total_supply_shares, total_before + shares);
+    assert!(p.w.chain.shard(p.owner.keys.id(), l).is_empty(), "held shares aren't in public state");
+
+    // Alice borrows publicly; a day of interest.
+    p.w.supply_collateral(ALICE, p.w.position_of(ALICE), 1_000_000).unwrap();
+    p.w.borrow(ALICE, 1_000_000).unwrap();
+    p.w.chain.now += 24 * 3_600_000;
+    p.w.publish("2.5");
+
+    let (selectors, ix, assets) = held_withdraw(p, shares);
+    assert!(assets > supplied, "interest accrued to the held shares");
+    let tx = p.op("held_withdraw", selectors, ix).unwrap();
+    let tkb_before = p.balance(tkb);
+    p.owner.advance(&tx, |a| {
+        a.data.set_shard(tkb, encode_balance(tkb_before + assets));
+        a.data.set_shard(l, held(market, 0, 0));
+    });
 }
 
 /// open → borrow to private → (a day) → repay from private → withdraw collateral to private.
@@ -170,6 +242,55 @@ fn a_private_owner_must_authorise_and_own_the_salt() {
     assert!(p.w.chain.settle(&tx).is_err(), "price claim above the feed");
 }
 
+#[test]
+fn a_private_lender_holds_its_shares_without_a_public_trace() {
+    require_dev_mode();
+    let mut p = private_lender();
+    held_lifecycle(&mut p);
+}
+
+/// E9's money-safety and authorisation: only the holder withdraws held shares, it can't inflate
+/// them, and a held account can't borrow (its holder could re-version it to dodge liquidation).
+#[test]
+fn held_shares_answer_only_to_their_holder() {
+    require_dev_mode();
+    let mut p = private_lender();
+    let (l, m, lender, market) = (p.w.lending, p.w.accounts(), p.owner.keys.id(), p.w.params.id());
+    let (tka, tkb, params) = (p.w.tka, p.w.tkb, p.w.params.clone());
+    let deps = [(tka, TOKEN_ELF), (tkb, TOKEN_ELF)];
+    let shares = held_supply(&mut p, 100_000);
+
+    // Without `ask` the holder isn't authorised: refused while proving.
+    let (selectors, ix, _) = held_withdraw(&p, shares);
+    let no_ask = p.owner.witness(&p.w.chain, false);
+    assert!(p.w.chain.prove(l, LENDING_ELF, &deps, selectors, vec![no_ask], ix).is_err());
+
+    // Anyone else naming the held account as a position fails the derivation check.
+    let rs = p.w.ratios().0;
+    assert!(p.w.withdraw_as(BOB, Some(BOB), lender, shares, rs).is_err());
+
+    // A forged plaintext with twice the shares: the proof binds a commitment that isn't on chain
+    // (settlement: "Unrecognized commitment set digest").
+    let (selectors, ix, _) = held_withdraw(&p, 2 * shares);
+    let mut forged = p.owner.witness(&p.w.chain, true);
+    let NullifierWitness::Update { account, .. } = &mut forged.nullifier else { unreachable!() };
+    account.data.set_shard(l, held(market, 2 * shares, 0));
+    let settled = p.w.chain.prove(l, LENDING_ELF, &deps, selectors, vec![forged], ix).and_then(|tx| p.w.chain.settle(&tx));
+    assert!(settled.is_err(), "inflated held shares were withdrawn");
+
+    // Collateral can sit on a held account, but can't be borrowed against.
+    let ix = Instruction::SupplyCollateral { params: params.clone(), assets: COLLATERAL };
+    let tx = p.op("held_supply_collateral", vec![(lender, l), (lender, tka), (m.collateral_vault, tka)], ix).unwrap();
+    p.owner.advance(&tx, |a| {
+        a.data.set_shard(tka, encode_balance(0));
+        a.data.set_shard(l, held(market, shares, COLLATERAL));
+    });
+    let ix = Instruction::Borrow { params, assets: 1000, salt: [0; 32], health: p.w.health() };
+    let selectors = vec![(lender, tkb), (m.market, l), (lender, l), (p.w.feed, p.w.oracle), (m.loan_vault, tkb)];
+    let witness = p.owner.witness(&p.w.chain, true);
+    assert!(p.w.chain.prove(l, LENDING_ELF, &deps, selectors, vec![witness], ix).is_err(), "a held account borrowed");
+}
+
 /// Plan 4.4: proving time and tx size per private op, with real proofs.
 #[test]
 #[ignore = "real proofs: ~10 min per op on an M1"]
@@ -177,6 +298,21 @@ fn real_proofs() {
     assert!(std::env::var("RISC0_DEV_MODE").is_err(), "unset RISC0_DEV_MODE for real proofs");
     let mut p = private_world();
     lifecycle(&mut p);
+    print_timings(&p);
+}
+
+/// E9: proving time and tx size of held supply and withdraw (the lender's shard is proven in the
+/// circuit instead of deferred), with real proofs. ~20 min on an M1.
+#[test]
+#[ignore = "real proofs: ~10 min per op on an M1"]
+fn real_proofs_held() {
+    assert!(std::env::var("RISC0_DEV_MODE").is_err(), "unset RISC0_DEV_MODE for real proofs");
+    let mut p = private_lender();
+    held_lifecycle(&mut p);
+    print_timings(&p);
+}
+
+fn print_timings(p: &Private) {
     println!("\n| private op | proving | tx bytes |\n|---|---:|---:|");
     for (op, time, bytes) in &p.timings {
         println!("| {op} | {:.1} s | {bytes} |", time.as_secs_f64());
