@@ -27,16 +27,120 @@ Status: experimental. Runs on a local dev-mode sequencer and on the LEZ testnet 
 
 ## How it works
 
+```mermaid
+flowchart LR
+    subgraph local["Your machine"]
+        user(["user"]) --> front["bos / bos-app"]
+        front --> client["client<br/>(core maths, claims,<br/>local proof if private)"]
+        wallet[("LEZ wallet<br/>keys, private state")] --- client
+    end
+
+    subgraph lez["LEZ v0.3.1 sequencer"]
+        lending["lending<br/>markets, positions"]
+        oracle["oracle<br/>price feeds"]
+        token["token<br/>one instance per asset"]
+        lending -- "checks price claim<br/>against the feed" --> oracle
+        lending -- "chained Transfer" --> token
+    end
+
+    client -- "public or private tx" --> lending
+    pusher["price pusher"] -- publish --> oracle
+    keeper["bos-keeper"] -- "scans blocks" --> lez
+    keeper -- liquidate --> lending
+```
+
 LEZ programs can't read state while planning a transaction, and each `apply` sees only one account
 shard. So every op carries claims about state it can't see (a ratio interval, a price interval, a
 validity window), and each shard checks the claims that concern it. The maths in `core` makes sure
 any value inside a claimed interval leaves the protocol no worse off.
 
-Private-mode ops are proven locally (around 10 minutes on an M1), so their claims are sized for
-that delay. Position addresses come from an HMAC of the private account's secret key, so a
-private owner can recover their positions from the mnemonic alone, and nobody else can link
-them. Lenders can also hold supply shares on their own private account (`--held`), with no public
-position at all.
+## Privacy
+
+Positions stay public so that anyone can liquidate them. What's hidden is who owns them.
+
+### A private op
+
+The owner is a private account. The lending program's `plan` runs inside the owner's own proof,
+so the owner's id, keys and position salt are witnesses and never leave the machine. Only the
+effects on public accounts are published.
+
+```mermaid
+sequenceDiagram
+    actor U as Owner (private account)
+    participant C as bos / client (local)
+    participant S as LEZ sequencer
+    participant O as Anyone (keeper, observer)
+    U->>C: borrow, position index 0
+    Note over C: derive the salt and position address<br/>run lending's plan in the zkVM<br/>prove locally (~10 min on an M1)
+    C->>S: private tx: proof, nullifiers, new commitments,<br/>effects on market, position, feed, loan vault
+    Note over S: verify the proof<br/>each public shard checks its claims
+    S-->>U: borrowed tokens land inside the owner's new commitment
+    O->>S: read blocks
+    Note over O: sees the position's debt, market totals, vault outflow<br/>doesn't see the owner, the salt or the receiving account
+```
+
+Private txs pay no fee for now, so no public account signs or pays, and none is linked.
+
+### Position addresses
+
+A position's address is derived from its owner, but through a salt that only the owner can
+compute. The salt is keyed by the private account's secret key, so positions can be recovered from
+the wallet mnemonic by walking `index = 0, 1, …`. Without the salt, anyone who knows the owner's
+private account id could compute its position addresses.
+
+```mermaid
+flowchart LR
+    subgraph proof["Stays in the proof"]
+        sk["secret spending key<br/>(from the mnemonic)"]
+        owner["owner account id"]
+        salt["salt = HMAC-SHA256(key, market ‖ owner ‖ index)"]
+        seed["seed = SHA256(market ‖ owner ‖ salt)"]
+    end
+    subgraph chain["Published"]
+        pda["position = PDA(lending, seed)"]
+    end
+    sk --> salt
+    owner --> salt
+    owner --> seed
+    salt --> seed
+    seed --> pda
+```
+
+### What can be linked
+
+All actions on one position share its address, so they're linked. Two positions of the same owner
+have unrelated addresses. A lender can go further and hold supply shares on their own private
+account (`--held`): then there's no public position at all, and supply and withdraw only change
+the market totals and the loan vault. Borrowing always uses a public position, because a position
+with debt has to stay liquidatable.
+
+```mermaid
+flowchart TB
+    subgraph salted["Salted positions (borrowers and lenders)"]
+        o1(["private owner"])
+        p0["position #0<br/>public: collateral, debt, health"]
+        p1["position #1<br/>unrelated address"]
+        o1 -. hidden .-> p0
+        o1 -. hidden .-> p1
+    end
+    subgraph held["Held shares (lenders, --held)"]
+        o2(["private owner<br/>shares inside its own account"])
+        m["market totals, loan vault<br/>the only public changes"]
+        o2 -. hidden .-> m
+    end
+```
+
+### What still leaks
+
+- **Exact amounts.** A distinctive amount can link a shield to a supply, or a borrow to a later
+  withdrawal from the private pool. A full `--held` withdrawal burns exactly the shares its
+  supply minted.
+- **Timing.** Shield, act and unshield in quick succession and the steps line up.
+- **Getting tokens in.** Shielding a token shows the source account and the amount.
+- **The client's settings.** Claims are published as they are, so every client uses the same
+  private defaults (`ClaimConfig::private()`) and rounds the window start down to the minute,
+  so that it doesn't show when proving started.
+- **A small anonymity set**, while few people use private mode.
 
 ## Build
 
