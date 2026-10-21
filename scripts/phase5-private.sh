@@ -65,6 +65,9 @@ echo "owner $OWNER" >&2
 step "private open: 400,000 TKA of collateral into the salted position (index 0)"
 expect "$(private_op 0 market supply-collateral "${ON[@]}" --from "$OWNER" --assets 400000000000)" 400000000000 "collateral"
 step "private borrow: 300,000 TKB to the owner's private account"
+# Fresh price before every priced private op: on testnet each one proves for ~11 min, and the run
+# outlasts the market's 1 h max price age (the first testnet run failed its second borrow on it).
+publish 2.5
 more "$(private_op 0 market borrow "${ON[@]}" --owner "$OWNER" --assets 300000000000)" 0 "debt shares"
 expect "$(bos token balance --token "$TKB" --account "$OWNER")" 350000000000 "private TKB after the borrow"
 step "private repay of everything, from the private account"
@@ -80,6 +83,7 @@ expect "$("$BOS_BIN" market positions --lending "$LENDING" --market "$MARKET" --
 if [[ -z "${SKIP_LIQUIDATION:-}" ]]; then
   step "a second position (index 1): 100,000 TKA, borrow 180,000 TKB (HF 1.11)"
   private_op 1 market supply-collateral "${ON[@]}" --from "$OWNER" --index 1 --assets 100000000000 > /dev/null
+  publish 2.5
   private_op 1 market borrow "${ON[@]}" --owner "$OWNER" --index 1 --assets 180000000000 > /dev/null
   P1=$("$BOS_BIN" market positions --lending "$LENDING" --market "$MARKET" --owner "$OWNER" 2> /dev/null | awk '$1 == 1 { print $2 }')
   [[ -n "$P1" ]] || { echo "FAIL: position 1 not found" >&2; exit 1; }
