@@ -45,8 +45,13 @@ fn protocol_stdout() -> Result<std::fs::File> {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // SAFETY: no runtime or worker threads exist yet.
+    unsafe { bosphorus_client::proving::configure() };
+    tokio::runtime::Runtime::new()?.block_on(run())
+}
+
+async fn run() -> Result<()> {
     let args = Args::parse();
     let mut out = protocol_stdout()?;
     let data_dir = match args.data_dir {

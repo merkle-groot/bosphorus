@@ -1,0 +1,12 @@
+[package]
+name = "stockverify"
+version = "0.1.0"
+edition = "2021"
+
+# Stock crates only: no workspace, no [patch]. Verifies a receipt from the patched Metal build.
+[dependencies]
+risc0-zkvm = { version = "=3.0.5", default-features = false, features = ["std"] }
+borsh = "1.5.7"
+anyhow = "1.0"
+
+[workspace]

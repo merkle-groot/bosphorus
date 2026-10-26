@@ -24,3 +24,14 @@ kernel void zk_shift(device Fp* io,
   Fp pow3 = pow(Fp(3), posRev);
   io[gid] = io[gid] * pow3;
 }
+
+// Bosphorus: zk_shift with 3^k from two tables, lo[k] = 3^k (k < 1024), hi[k] = 3^(1024 k).
+kernel void zk_shift_table(device Fp* io,
+                           const device uint32_t& bits,
+                           const device Fp* lo,
+                           const device Fp* hi,
+                           uint gid [[thread_position_in_grid]]) {
+  uint32_t pos = gid & ((1 << bits) - 1);
+  uint32_t posRev = reverse_bits(pos) >> (32 - bits);
+  io[gid] = io[gid] * (lo[posRev & 1023] * hi[posRev >> 10]);
+}

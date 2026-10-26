@@ -1,0 +1,12 @@
+risc0-metal-hybrid
+Copyright (c) 2026 AnubisQuantumCipher
+
+This repository contains a modified copy of the risc0-circuit-rv32im crate
+(version 4.0.4), Copyright RISC Zero, Inc., licensed under the Apache License,
+Version 2.0. The modifications add a hybrid Metal proving lane for Apple
+Silicon; every modified or added file carries a prominent change notice as
+required by Section 4(b) of the license. RISC Zero is not affiliated with and
+does not endorse this repository.
+
+The e2e/ example is scaffolded from the RISC Zero Rust starter template
+(Apache License 2.0); modified files there carry change notices as well.

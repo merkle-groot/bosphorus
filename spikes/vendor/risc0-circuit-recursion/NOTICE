@@ -1,0 +1,4 @@
+This crate contains RISC Zero code, Copyright RISC Zero, Inc., licensed under Apache-2.0.
+Bosphorus adds a hybrid Metal prover in src/prove/hal/metal_hybrid.rs, enables it in
+src/prove/mod.rs and src/prove/hal/mod.rs, and pins risc0-zkp 3.0.4 in Cargo.toml.
+The circuit kernels, verification code, control IDs and guest programs are unchanged.

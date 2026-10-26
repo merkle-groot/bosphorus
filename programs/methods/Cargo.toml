@@ -9,6 +9,10 @@ license.workspace = true
 [build-dependencies]
 risc0-build.workspace = true
 
+# Only for the real-proof tests (`--features prove`): our proving schedule.
+[dependencies]
+bosphorus-prover = { workspace = true, optional = true }
+
 [package.metadata.risc0]
 methods = ["../token/guest", "../oracle/guest", "../lending/guest", "../test-caller"]
 
@@ -23,3 +27,6 @@ bosphorus-lending.workspace = true
 bosphorus-core.workspace = true
 borsh.workspace = true
 anyhow.workspace = true
+
+[features]
+prove = ["lee/prove", "dep:bosphorus-prover"]

@@ -13,10 +13,37 @@ spike-guest = { path = "../methods/guest" }
 borsh.workspace = true
 anyhow.workspace = true
 program_loader_core.workspace = true
+risc0-zkvm.workspace = true
 # S4 stage timing: risc0's in-process prover logs `prove_session`/`prove_segment_core` at debug.
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+risc0-circuit-rv32im = { version = "=4.0.4", optional = true, features = ["prove"] }
+# `metal_eval_bench`: GPU constraint kernels against risc0's CPU ones.
+risc0-metal = { path = "../vendor/risc0-metal", optional = true }
+risc0-zkp = { version = "=3.0.4", optional = true, features = ["prove"] }
+risc0-circuit-rv32im-sys = { version = "=4.0.2", optional = true }
+risc0-circuit-recursion-sys = { version = "=4.0.2", optional = true }
+risc0-circuit-keccak-sys = { version = "=4.0.2", optional = true }
+
+[dependencies.bosphorus-prover]
+workspace = true
+optional = true
 
 [features]
-# In-process prover (instead of r0vm over IPC). On Apple silicon this uses the Metal GPU backend;
-# building it needs Xcode's `metal` compiler.
-prove = ["lee/prove"]
+# In-process prover: the vendored rv32im backend uses Metal for generic STARK operations on
+# Apple silicon. Circuit constraints still use CPU kernels; keccak and recursion also offload
+# their generic STARK operations to Metal.
+prove = ["lee/prove", "dep:bosphorus-prover", "dep:risc0-circuit-rv32im", "dep:risc0-metal", "dep:risc0-zkp",
+    "dep:risc0-circuit-rv32im-sys", "dep:risc0-circuit-recursion-sys", "dep:risc0-circuit-keccak-sys"]
+# `cpu_kernel_bench`: risc0-zkp's reference CpuHal only, no Metal/CUDA. Portable (scripts/bench-proving.sh).
+cpu-bench = ["dep:risc0-zkp"]
+# In-process proving on risc0's own (stock, un-vendored-logic) CUDA HAL: no Metal, no bosphorus-prover
+# schedule. scripts/bench-proving.sh builds this when an NVIDIA GPU + CUDA toolkit are detected.
+cuda = ["lee/prove", "risc0-zkvm/cuda"]
+
+[[bin]]
+name = "metal_eval_bench"
+required-features = ["prove"]
+
+[[bin]]
+name = "cpu_kernel_bench"
+required-features = ["cpu-bench"]

@@ -54,6 +54,18 @@ void do_partial_sboxes(thread Fp* cells) {
   cells[0] = sbox(cells[0]);
 }
 
+// Bosphorus: M_INT_DIAG_HZN (risc0-zkp poseidon2/consts.rs) in plain form, and the Shoup factors
+// floor(d * 2^32 / P). x * d - q * P with q = hi(x * s) is x * d mod P plus 0 or P; for x in
+// Montgomery form it is the Montgomery form of the product, the value `M_INT_DIAG[i] * x` gives.
+constant uint32_t M_INT_DIAG_PLAIN[CELLS] = {0x409133f0, 0x1667a8a1, 0x06a6c7b6, 0x6f53160e, 0x273b11d1, 0x03176c5d, 0x72f9bbf9, 0x73ceba91, 0x5cdef81d, 0x01393285, 0x46daee06, 0x065d7ba6, 0x52d72d6f, 0x05dd05e0, 0x3bab4b63, 0x6ada3842, 0x2fc5fbec, 0x770d61b0, 0x5715aae9, 0x03ef0e90, 0x75b6c770, 0x242adf5f, 0x00d0ca4c, 0x36c0e388};
+constant uint32_t M_INT_DIAG_SHOUP[CELLS] = {0x89be4ca9, 0x2fcc1268, 0x0e3098fb, 0xed7e0ce8, 0x53b13712, 0x06985ea4, 0xf547f766, 0xf70e5acc, 0xc61fef2b, 0x029c2782, 0x9728622d, 0x0d943afb, 0xb0b9fa84, 0x0c822eaa, 0x7f4b4b7c, 0xe3f3ab35, 0x65eaa1f6, 0xfdfa69fd, 0xb9c7d300, 0x08646355, 0xfb1f8753, 0x4d2842ec, 0x01bd6b4c, 0x74ceb232};
+
+inline Fp mul_diag(Fp x, uint i) {
+  uint32_t a = x.asRaw();
+  uint32_t r = a * M_INT_DIAG_PLAIN[i] - metal::mulhi(a, M_INT_DIAG_SHOUP[i]) * Fp::P;
+  return Fp::fromRaw(r >= Fp::P ? r - Fp::P : r);
+}
+
 void multiply_by_m_int(const device Fp* M_INT_DIAG, thread Fp* cells) {
   // Exploit the fact that off-diagonal entries of M_INT are all 1.
   Fp sum = 0;
@@ -61,7 +73,7 @@ void multiply_by_m_int(const device Fp* M_INT_DIAG, thread Fp* cells) {
     sum += cells[i];
   }
   for (uint i = 0; i < CELLS; i++) {
-    cells[i] = sum + M_INT_DIAG[i] * cells[i];
+    cells[i] = sum + mul_diag(cells[i], i);
   }
 }
 
@@ -69,10 +81,13 @@ void multiply_by_4x4_circulant(thread Fp* x) {
   // See appendix B of Poseidon2 paper.
   Fp t0 = x[0] + x[1];
   Fp t1 = x[2] + x[3];
-  Fp t2 = Fp(2) * x[1] + t1;
-  Fp t3 = Fp(2) * x[3] + t0;
-  Fp t4 = Fp(4) * t1 + t3;
-  Fp t5 = Fp(4) * t0 + t2;
+  // Bosphorus: 2x and 4x as additions (Montgomery form is linear), not Montgomery products.
+  Fp t2 = (x[1] + x[1]) + t1;
+  Fp t3 = (x[3] + x[3]) + t0;
+  Fp t1x2 = t1 + t1;
+  Fp t0x2 = t0 + t0;
+  Fp t4 = (t1x2 + t1x2) + t3;
+  Fp t5 = (t0x2 + t0x2) + t2;
   Fp t6 = t3 + t5;
   Fp t7 = t2 + t4;
   x[0] = t6;
@@ -172,18 +187,21 @@ kernel void poseidon2_rows(const device Fp* ROUND_CONSTANTS,
                            const device uint32_t& col_size,
                            uint gid [[thread_position_in_grid]]) {
   Fp cells[CELLS];
-  uint used = 0;
-  for (uint i = 0; i < col_size; i++) {
-    cells[used++] = matrix[i * count + gid];
-    if (used == CELLS_RATE) {
-      poseidon2_mix(ROUND_CONSTANTS, M_INT_DIAG, cells);
-      used = 0;
+  // Bosphorus: the same overwrite-mode sponge as before (each CELLS_RATE inputs overwrite the
+  // rate cells, then a mix; a short tail is zero-padded), but every cell index is a compile-time
+  // constant so `cells` can stay in registers. `cells[used++]` forced it into memory.
+  uint full = col_size / CELLS_RATE;
+  for (uint chunk = 0; chunk < full; chunk++) {
+    for (uint j = 0; j < CELLS_RATE; j++) {
+      cells[j] = matrix[(chunk * CELLS_RATE + j) * count + gid];
     }
+    poseidon2_mix(ROUND_CONSTANTS, M_INT_DIAG, cells);
   }
-  if (used != 0 || count == 0) {
+  uint tail = col_size - full * CELLS_RATE;
+  if (tail != 0 || count == 0) {
     // Zero pad to get a CELLS_RATE-aligned number of inputs
-    for (uint i = used; i < CELLS_RATE; i++)  {
-        cells[i] = Fp(0);
+    for (uint j = 0; j < CELLS_RATE; j++) {
+      cells[j] = j < tail ? matrix[(full * CELLS_RATE + j) * count + gid] : Fp(0);
     }
     poseidon2_mix(ROUND_CONSTANTS, M_INT_DIAG, cells);
   }

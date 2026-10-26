@@ -6,11 +6,15 @@ use std::{borrow::Cow, collections::HashMap};
 
 use anyhow::Result;
 use borsh::BorshSerialize;
+#[cfg(feature = "prove")]
+use bosphorus_prover::execute_and_prove;
+#[cfg(not(feature = "prove"))]
+use lee::privacy_preserving_transaction::circuit::execute_and_prove;
 use lee::{
     Account, AccountId, PrivacyPreservingTransaction,
     privacy_preserving_transaction::{
         Message, WitnessSet,
-        circuit::{ProgramWithDependencies, ProvingInput, execute_and_prove},
+        circuit::{ProgramWithDependencies, ProvingInput},
     },
     program::Program,
 };

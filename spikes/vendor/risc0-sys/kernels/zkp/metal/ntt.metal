@@ -36,6 +36,11 @@ kernel void multi_bit_reverse(device Fp* io,
   }
 }
 
+// Bosphorus: one threadgroup of 256 per evaluation, as before, but with ~5x fewer multiplies.
+// Coefficient i = 256 j + t is read by thread t at step j (coalesced) and x^i = x^t * y^j with
+// y = x^256. Thread t sums c(256 j + t) * y^n over blocks of 256 steps j = 256 b + n, using a
+// table of y^n (n < 256) in threadgroup memory and carrying z^b = y^(256 b); x^t is applied last.
+// Field sums are exact, so the regrouping gives the same value.
 kernel void multi_poly_eval(device FpExt* out,
                             const device Fp* coeffs,
                             const device uint32_t* which,
@@ -43,17 +48,33 @@ kernel void multi_poly_eval(device FpExt* out,
                             const device uint32_t& deg,
                             uint3 blockIdx [[threadgroup_position_in_grid]],
                             uint3 threadIdx [[thread_position_in_threadgroup]]) {
+  threadgroup uint32_t ypowBuf[256 * 4];
+  threadgroup FpExt* ypow = reinterpret_cast<threadgroup FpExt*>(ypowBuf);
+  uint32_t t = threadIdx.x;
   device const Fp* cur_poly = coeffs + which[blockIdx.x] * deg;
   FpExt x = xs[blockIdx.x];
-  FpExt stepx = pow(x, 256);
-  FpExt powx = pow(x, threadIdx.x);
+  FpExt y = pow(x, 256);
+  ypow[t] = pow(y, t);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  FpExt zstep = pow(y, 256);
+  FpExt zpow(1);
   FpExt tot;
-  for (size_t i = threadIdx.x; i < deg; i += 256) {
-    tot += powx * cur_poly[i];
-    powx *= stepx;
+  uint32_t steps = (deg + 255) / 256;
+  for (uint32_t j0 = 0; j0 < steps; j0 += 256) {
+    uint32_t count = min(256u, steps - j0);
+    FpExt inner;
+    for (uint32_t n = 0; n < count; n++) {
+      uint32_t i = 256 * (j0 + n) + t;
+      if (i < deg) {
+        inner += FpExt(ypow[n]) * cur_poly[i];
+      }
+    }
+    tot += zpow * inner;
+    zpow *= zstep;
   }
-  threadgroup uint32_t totsBuf[256 * 4];
-  threadgroup FpExt* tots = reinterpret_cast<threadgroup FpExt*>(totsBuf);
+  tot = tot * pow(x, t);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  threadgroup FpExt* tots = ypow;
   tots[threadIdx.x] = tot;
   threadgroup_barrier(mem_flags::mem_threadgroup);
   unsigned cur = 256;

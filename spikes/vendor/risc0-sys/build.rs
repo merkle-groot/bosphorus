@@ -68,6 +68,7 @@ fn build_metal_kernels() {
             "fri.metal",
             "mix.metal",
             "ntt.metal",
+            "ntt_fast.metal",
             "poseidon2.metal",
             "sha.metal",
             "zk.metal",
@@ -83,6 +84,9 @@ fn build_metal_kernels() {
             .files(src_paths)
             .include(inc_path)
             .dep(inc_path.join("sha256.h"))
+            // Bosphorus: fp.h/fpext.h here shadow risc0-build-kernel's (3-multiply product).
+            .dep(inc_path.join("fp.h"))
+            .dep(inc_path.join("fpext.h"))
             .compile(&out);
     }
 }

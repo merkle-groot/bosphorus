@@ -11,13 +11,17 @@
 
 use std::{collections::HashMap, time::Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
+#[cfg(feature = "prove")]
+use bosphorus_prover::execute_and_prove;
+#[cfg(not(feature = "prove"))]
+use lee::privacy_preserving_transaction::circuit::execute_and_prove;
 use lee::{
     Account, AccountId, PrivacyPreservingTransaction, V03State,
     native_token::NATIVE_TOKEN_PROGRAM_ID,
     privacy_preserving_transaction::{
         Message, WitnessSet,
-        circuit::{ProgramWithDependencies, ProvingInput, execute_and_prove},
+        circuit::{ProgramWithDependencies, Proof, ProvingInput},
     },
     program::Program,
 };
@@ -74,6 +78,11 @@ fn prove(
         },
         &deps,
     )?;
+    if let Ok(dir) = std::env::var("S4_DUMP") {
+        // For a check with an unpatched verifier: the receipt and the journal it commits to.
+        std::fs::write(format!("{dir}/proof.bin"), proof.clone().into_inner())?;
+        std::fs::write(format!("{dir}/journal.bin"), output.to_bytes())?;
+    }
     let message = Message::from_circuit_output(vec![], output);
     let witness_set = WitnessSet::for_message(&message, proof, &[]);
     Ok(PrivacyPreservingTransaction::new(message, witness_set))
@@ -105,9 +114,34 @@ fn main() -> Result<()> {
     let started = Instant::now();
     let tx = prove(&s, position, None, vec![witness], borrow(salt, 40))?;
     let proving = started.elapsed();
+    if !dev {
+        let mut inner: risc0_zkvm::InnerReceipt = borsh::from_slice(&tx.witness_set.proof().clone().into_inner())?;
+        let risc0_zkvm::InnerReceipt::Succinct(receipt) = &mut inner else {
+            bail!("real-proof benchmark requires a succinct receipt");
+        };
+        receipt.seal[0] ^= 1;
+        let bad = PrivacyPreservingTransaction::new(tx.message.clone(), WitnessSet::for_message(
+            &tx.message, Proof::from_inner(borsh::to_vec(&inner)?), &[],
+        ));
+        ensure!(s.state.clone().transition_from_privacy_preserving_transaction(&bad, 1, 1_499).is_err(),
+            "verifier accepted a corrupted proof");
+    }
     let bytes = borsh::to_vec(&tx)?;
     println!("A: proved in {proving:.2?}; tx {} bytes", bytes.len());
-    if std::env::var("S4_ONLY_A").is_ok_and(|v| v == "1") {
+    if std::env::var_os("S4_CLAIM").is_some() {
+        let inner: risc0_zkvm::InnerReceipt = borsh::from_slice(&tx.witness_set.proof().clone().into_inner())?;
+        if let risc0_zkvm::InnerReceipt::Succinct(receipt) = &inner {
+            println!("   claim: {:?}", receipt.claim);
+            println!("   seal {} words, claim {} bytes", receipt.seal.len(), borsh::to_vec(&receipt.claim)?.len());
+        }
+    }
+    #[cfg(feature = "prove")]
+    if std::env::var_os("R0_PROFILE").is_some() {
+        let [witness, accum, constraints] = risc0_circuit_rv32im::prove::phase_profile_ns();
+        println!("rv32im CPU stages: witness={:.3}s accum={:.3}s constraints={:.3}s",
+            witness as f64 / 1e9, accum as f64 / 1e9, constraints as f64 / 1e9);
+    }
+    if std::env::var("S4_PROFILE_ONLY").is_ok_and(|v| v == "1") {
         // With `RISC0_PPROF_OUT`, the last session profiled is then the privacy circuit.
         return Ok(());
     }
@@ -143,6 +177,17 @@ fn main() -> Result<()> {
     assert!(!contains(&bytes, s.owner.id().as_ref()), "owner id leaked");
     assert!(!contains(&bytes, &salt), "salt leaked");
     println!("   byte scan: neither the owner id nor the salt appears in the tx");
+
+    if std::env::var("S4_ONLY_A").is_ok_and(|v| v == "1") {
+        println!("S2 A: proof verified and settled");
+        if let Ok(limit) = std::env::var("S4_MAX_SECONDS") {
+            let limit: f64 = limit.parse()?;
+            ensure!(limit.is_finite() && limit > 0.0, "S4_MAX_SECONDS must be a positive finite number");
+            ensure!(!dev, "a proof latency budget must use real proofs");
+            ensure!(proving.as_secs_f64() < limit, "proof took {:.3}s; target is <{limit}s", proving.as_secs_f64());
+        }
+        return Ok(());
+    }
 
     // B: pay out to a different, fresh private account.
     let mut s = setup();

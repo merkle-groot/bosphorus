@@ -7,6 +7,7 @@
 //! inclusion block and its timestamp, and the fee when the payer is known.
 
 pub mod lending;
+pub mod proving;
 
 use std::{borrow::Cow, collections::HashMap, fmt, str::FromStr};
 

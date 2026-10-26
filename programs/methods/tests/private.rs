@@ -291,6 +291,34 @@ fn held_shares_answer_only_to_their_holder() {
     assert!(p.w.chain.prove(l, LENDING_ELF, &deps, selectors, vec![witness], ix).is_err(), "a held account borrowed");
 }
 
+/// A single production lending borrow, with public collateral setup outside the timer.
+#[test]
+#[ignore = "real local proof benchmark"]
+fn real_proof_borrow() {
+    assert!(std::env::var("RISC0_DEV_MODE").is_err(), "unset RISC0_DEV_MODE for real proofs");
+    let mut p = private_world();
+    p.w.supply_collateral(ALICE, p.position, COLLATERAL).unwrap();
+    let (l, m, owner, tkb) = (p.w.lending, p.w.accounts(), p.owner.keys.id(), p.w.tkb);
+    let health = p.w.health();
+    let shares = claims::borrow_shares(BORROWED, &health.rb).unwrap();
+    let ix = Instruction::Borrow { params: p.w.params.clone(), assets: BORROWED, salt: SALT, health };
+    let selectors = vec![(owner, tkb), (m.market, l), (p.position, l), (p.w.feed, p.w.oracle), (m.loan_vault, tkb)];
+    let tx = p.op("borrow", selectors, ix).unwrap();
+    let before = p.balance(tkb);
+    p.owner.advance(&tx, |a| a.data.set_shard(tkb, encode_balance(before + BORROWED)));
+    let Shard::Position(position) = borsh::from_slice(&p.w.chain.shard(p.position, l)).unwrap() else {
+        panic!("missing borrower position");
+    };
+    assert_eq!(position.borrow_shares, shares);
+    assert_eq!(p.w.balance(tkb, m.loan_vault), 2_000_000 - BORROWED);
+    print_timings(&p);
+    if let Ok(limit) = std::env::var("S4_MAX_SECONDS") {
+        let limit: f64 = limit.parse().expect("S4_MAX_SECONDS must be a number");
+        assert!(limit.is_finite() && limit > 0.0, "S4_MAX_SECONDS must be positive and finite");
+        assert!(p.timings[0].1.as_secs_f64() < limit, "proof missed the <{limit}s target");
+    }
+}
+
 /// Plan 4.4: proving time and tx size per private op, with real proofs.
 #[test]
 #[ignore = "real proofs: ~10 min per op on an M1"]

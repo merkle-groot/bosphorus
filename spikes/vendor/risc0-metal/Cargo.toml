@@ -1,0 +1,18 @@
+[package]
+name = "risc0-metal"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+metal = "0.29"
+risc0-zkp = { version = "=3.0.4", features = ["prove"] }
+
+[dev-dependencies]
+risc0-circuit-rv32im-sys = "=4.0.2"
+risc0-circuit-recursion-sys = "=4.0.2"
+risc0-circuit-keccak-sys = "=4.0.2"
+
+[build-dependencies]
+cc = "1.2"
+

@@ -1,0 +1,14 @@
+[package]
+name = "bosphorus-prover"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# LEZ's `execute_and_prove` on a schedule of our own: the same proof, with guest and circuit
+# proving overlapped on two threads that share the GPU. Host only.
+[dependencies]
+lee = { workspace = true, features = ["prove"] }
+lee_core.workspace = true
+risc0-zkvm = { workspace = true, features = ["prove"] }
+borsh.workspace = true
+anyhow.workspace = true

@@ -17,6 +17,7 @@ members = [
     "spikes/methods",
     "spikes/methods/guest",
     "spikes/harness",
+    "prover",
 ]
 exclude = ["spikes/vendor"]
 
@@ -48,14 +49,21 @@ bosphorus-oracle = { path = "programs/oracle/core" }
 bosphorus-lending = { path = "programs/lending/core" }
 bosphorus-methods = { path = "programs/methods" }
 spike-methods = { path = "spikes/methods" }
+bosphorus-prover = { path = "prover" }
 
 # Copied from LEZ v0.3.1: keccak speedup for in-guest ML-KEM. Needed for identical resolution.
 [patch.crates-io]
 keccak = { git = "https://github.com/logos-blockchain/sponges", rev = "3a56e99771beedf04946eab21a4a62adc2951377" }
-# Spike-only: risc0-sys 1.5.0's Metal kernels don't compile with Xcode 27's Metal compiler
+# risc0-sys 1.5.0's Metal kernels don't compile with Xcode 27's Metal compiler
 # (`Fp = 0` is ambiguous). Three `= 0` → `= Fp(0)` in poseidon2.metal, same semantics.
-# Only built with `--features prove` (in-process/Metal proving). See docs/spikes/S4-proving.md.
+# Built with `--features prove` (in-process/Metal proving). See spikes/vendor/README.md.
 risc0-sys = { path = "spikes/vendor/risc0-sys" }
+# Host-only Metal acceleration with the same RISC Zero 3.0.5 verifier and guest images.
+risc0-circuit-rv32im = { path = "spikes/vendor/risc0-circuit-rv32im" }
+risc0-circuit-recursion = { path = "spikes/vendor/risc0-circuit-recursion" }
+risc0-circuit-keccak = { path = "spikes/vendor/risc0-circuit-keccak" }
+# Same 3.0.4 source; only the Metal HAL's NTT dispatch changes (spikes/vendor/risc0-sys has the kernels).
+risc0-zkp = { path = "spikes/vendor/risc0-zkp" }
 
 [profile.dev]
 debug = "line-tables-only"
