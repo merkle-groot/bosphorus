@@ -8,13 +8,18 @@
 //! units and WAD fractions are decimals (`"0.8"`), both as strings (a u128 doesn't fit a JSON
 //! number). Errors carry a `code`: `core`'s refusals in snake case (`stale_price`, `unhealthy`,
 //! `insufficient_liquidity`, …), `payer_cannot_fund`, `not_included`, `bad_request`,
-//! `unknown_method`, `not_found`, `timeout`, or `failed`.
+//! `unknown_method`, `not_found`, `timeout`, `network` (the sequencer can't be reached or didn't
+//! answer), `rejected` (the sequencer refused a tx: nothing was sent), `insufficient_balance`,
+//! `unconfirmed` (a transfer went out but hasn't shown up: don't repeat it before a sync), or
+//! `failed`.
 
 pub mod jobs;
 
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
+    fs,
+    os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _},
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -24,13 +29,13 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, ensure};
 use bosphorus_client::{
-    Client, Feed, Holder, LENDING_ELF, ORACLE_ELF, TOKEN_ELF, hex_id, image_id,
+    Client, Feed, Holder, LENDING_ELF, ORACLE_ELF, Rejected, TOKEN_ELF, hex_id, image_id,
     lending::{
-        ClaimConfig, Expect, HashType, Market, MarketAccounts, MarketId, On, Owner, Position, Prepared, Refusal, Scanner, Sent,
+        ClaimConfig, Expect, HashType, LeeTransaction, Market, MarketAccounts, MarketId, On, Owner, Position, Prepared, Refusal, Scanner, Sent,
         SharedSecretKey, market_id_hex, market_status, now_ms, parse_market_id, position_status,
     },
 };
-use bosphorus_core::{U256, WAD, format_wad};
+use bosphorus_core::{U256, WAD, format_wad, shares};
 use lee::AccountId;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -38,8 +43,20 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 
 use jobs::{Expected, Job, State, Store, Verdict, settle};
 
+/// What `wallet::BEFORE_SEND` calls.
+type SendHook = Box<dyn Fn(HashType, &[SharedSecretKey]) + Send + Sync>;
+
 /// How often a job looks for its tx (the localnet makes a block every 15 s, the testnet every 10 s).
 const POLL: Duration = Duration::from_secs(3);
+/// A transfer not included this many blocks after it was sent was dropped (the sequencer includes
+/// a tx in the next block or skips it: a failed settlement, a stale nonce).
+const TRANSFER_BLOCKS: u64 = 8;
+/// …or, if the chain makes no blocks, after this long: then it's `unconfirmed`, not dropped.
+const TRANSFER_WAIT: Duration = Duration::from_secs(10 * 60);
+/// How long `info` waits for the sequencer before reporting it unreachable.
+const INFO_TIMEOUT: Duration = Duration::from_secs(10);
+/// Blocks per wallet lock while syncing, so reads go on between steps.
+const SYNC_STEP: u64 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,6 +96,11 @@ pub struct OpRequest {
     /// Fee payer for public txs (default: the signer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payer: Option<String>,
+    /// `"assets"`: an exact withdraw/repay `amount` counts loan-token units, converted to shares at
+    /// the market's current (projected) ratio, rounded down and capped at the position's shares.
+    /// Default `"shares"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
 }
 
 enum Amount {
@@ -139,14 +161,25 @@ impl ApiError {
                 Some(c.code.to_string())
             } else if let Some(core) = cause.downcast_ref::<bosphorus_core::Error>() {
                 Some(snake_case(&format!("{core:?}")))
+            } else if cause.is::<Rejected>() {
+                Some("rejected".into())
             } else {
                 cause.downcast_ref::<Refusal>().map(|r| match r {
                     Refusal::PayerCannotFund { .. } => "payer_cannot_fund".to_string(),
                 })
             }
         });
+        let code = code.or_else(|| is_network(&message).then(|| "network".to_string()));
         Self { code: code.unwrap_or_else(|| "failed".into()), message }
     }
+}
+
+/// Whether an error is the sequencer being unreachable or silent. The RPC client's errors reach
+/// here as text (the wallet formats them), so this reads the text.
+fn is_network(message: &str) -> bool {
+    ["Request timeout", "RequestTimeout", "client error (SendRequest)", "client error (Connect)", "Connection refused", "Connection reset", "connection closed", "IncompleteMessage", "dns error", "error trying to connect", "Transport("]
+        .iter()
+        .any(|m| message.contains(m))
 }
 
 /// An error with an API code.
@@ -212,6 +245,8 @@ fn unhex32(s: &str) -> Result<[u8; 32]> {
 }
 
 pub struct Config {
+    /// The wallet's directory; `None` is `LEE_WALLET_HOME_DIR`, like the `wallet` binary.
+    pub wallet_home: Option<PathBuf>,
     pub lending: AccountId,
     /// Jobs and the market scan cache.
     pub data_dir: PathBuf,
@@ -232,7 +267,19 @@ pub struct App {
 }
 
 struct Inner {
+    /// Held briefly by reads; for writing only while holding `heavy`, so a writer never waits
+    /// behind a long read (a proof) and reads never queue behind that writer.
     client: RwLock<Client>,
+    /// One slow or wallet-changing thing at a time: a job's prepare-prove-send, a transfer, a sync
+    /// step, a new account, recording a landed tx. Proofs run under it (two would fight over the
+    /// GPU and could spend the same note).
+    heavy: tokio::sync::Mutex<()>,
+    /// Subscribed before the worker starts, so the first subscriber sees the resumed jobs' events.
+    first_events: Mutex<Option<broadcast::Receiver<Value>>>,
+    /// `(synced, target)` while a sync runs.
+    syncing: Mutex<Option<(u64, u64)>>,
+    /// Set by [`App::stop`]: calls in flight answer `stopping`, no new job starts.
+    stopping: tokio::sync::watch::Sender<bool>,
     config: Config,
     store: Store,
     jobs: Mutex<BTreeMap<String, Job>>,
@@ -240,12 +287,35 @@ struct Inner {
     events: broadcast::Sender<Value>,
     scan: tokio::sync::Mutex<MarketScan>,
     next_id: AtomicU64,
+    /// The wallet's and the data dir's, held while the app runs.
+    _locks: [fs::File; 2],
+}
+
+/// Takes `dir/bosphorus-app.lock` (an OS file lock, released when the app is dropped or its
+/// process dies). Two apps on one wallet would overwrite each other's saves (each holds the wallet
+/// in memory), and on one data dir both would resume the same jobs, so the second is refused,
+/// whether in this process or another. `bos` and LEZ's `wallet` CLI don't take it.
+fn lock(dir: &Path) -> Result<fs::File> {
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let path = dir.join("bosphorus-app.lock");
+    let file = fs::OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(&path).with_context(|| format!("opening {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::WouldBlock) => Err(coded("wallet_in_use", format!("{} is in use by another Bosphorus app: close that one first", dir.display()))),
+        Err(fs::TryLockError::Error(e)) => Err(anyhow::Error::new(e).context(format!("locking {}", path.display()))),
+    }
 }
 
 impl App {
-    /// Opens the wallet at `LEE_WALLET_HOME_DIR` and resumes unfinished jobs. Needs a tokio runtime.
+    /// Opens the wallet (`config.wallet_home`, else `LEE_WALLET_HOME_DIR`), locks it and the data
+    /// dir ([`lock`]) and resumes unfinished jobs. Needs a tokio runtime.
     pub async fn open(config: Config) -> Result<Self> {
-        let client = Client::from_env().context("opening the wallet (is LEE_WALLET_HOME_DIR set?)")?;
+        let (client, home) = match &config.wallet_home {
+            Some(home) => (Client::open(home).with_context(|| format!("opening the wallet in {}", home.display()))?, home.clone()),
+            None => (Client::from_env().context("opening the wallet (is LEE_WALLET_HOME_DIR set?)")?, wallet::helperfunctions::get_home()?),
+        };
+        // Before any job is resumed.
+        let locks = [lock(&home)?, lock(&config.data_dir)?];
         let (store, mut jobs) = Store::open(config.data_dir.join("jobs"))?;
         // A job left preparing sent nothing: run it again.
         for job in jobs.values_mut().filter(|j| j.state == State::Preparing) {
@@ -259,9 +329,13 @@ impl App {
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or(MarketScan { next_block: config.scan_from, markets: vec![] });
         let (queue, rx) = mpsc::unbounded_channel();
-        let (events, _) = broadcast::channel(256);
+        let (events, first_events) = broadcast::channel(256);
         let inner = Arc::new(Inner {
             client: RwLock::new(client),
+            heavy: tokio::sync::Mutex::new(()),
+            first_events: Mutex::new(Some(first_events)),
+            syncing: Mutex::new(None),
+            stopping: tokio::sync::watch::Sender::new(false),
             config,
             store,
             jobs: Mutex::new(jobs),
@@ -269,14 +343,23 @@ impl App {
             events,
             scan: tokio::sync::Mutex::new(scan),
             next_id: AtomicU64::new(0),
+            _locks: locks,
         });
         tokio::spawn(worker(inner.clone(), rx, resume));
+        bosphorus_client::proving::warm_up();
         Ok(Self { inner })
+    }
+
+    /// Ends every call in flight with `stopping` (a transfer being proven sends nothing) and
+    /// starts no more jobs, so the app can be closed without waiting for a proof. A job stopped
+    /// mid-proof is `interrupted` at the next open. Doesn't block.
+    pub fn stop(&self) {
+        self.inner.stopping.send_replace(true);
     }
 
     /// Every job change, as the job's view.
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
-        self.inner.events.subscribe()
+        self.inner.first_events.lock().expect("events lock").take().unwrap_or_else(|| self.inner.events.subscribe())
     }
 
     /// `{"id", "method", "params"}` → `{"id", "result"}` or `{"id", "error": {"code", "message"}}`.
@@ -299,7 +382,11 @@ impl App {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, ApiError> {
-        self.dispatch(method, params).await.map_err(|e| ApiError::from_anyhow(&e))
+        let mut stopping = self.inner.stopping.subscribe();
+        tokio::select! {
+            r = self.dispatch(method, params) => r.map_err(|e| ApiError::from_anyhow(&e)),
+            _ = stopping.wait_for(|s| *s) => Err(ApiError { code: "stopping".into(), message: "Bosphorus is closing".into() }),
+        }
     }
 
     async fn dispatch(&self, method: &str, p: Value) -> Result<Value> {
@@ -338,6 +425,38 @@ impl App {
                 let p: OwnerP = params(p)?;
                 self.positions(market(&p.market)?, holder(&p.owner)?).await
             }
+            "new_account" => {
+                #[derive(Deserialize)]
+                struct P {
+                    #[serde(default)]
+                    private: bool,
+                }
+                let p: P = params(p)?;
+                let _heavy = self.inner.heavy.lock().await;
+                let holder = self.inner.client.write().await.new_account(p.private)?;
+                Ok(json!({ "account": holder.to_string() }))
+            }
+            "transfer" => {
+                #[derive(Deserialize)]
+                struct P {
+                    from: String,
+                    to: String,
+                    amount: String,
+                    // A token program (`Public/<id>`); native LEZ if absent.
+                    #[serde(default)]
+                    token: Option<String>,
+                }
+                let p: P = params(p)?;
+                let amount = p.amount.parse::<u128>().map_err(|e| coded("bad_request", format!("amount: {e}")))?;
+                ensure!(amount > 0, coded("bad_request", "amount: nothing to move"));
+                let token = match p.token.as_deref().map(holder).transpose()? {
+                    None => None,
+                    Some(Holder::Public(token)) => Some(token),
+                    Some(Holder::Private(_)) => return Err(coded("bad_request", "token: a token is a Public/<id> program")),
+                };
+                self.transfer(token, holder(&p.from)?, holder(&p.to)?, amount).await
+            }
+            "sync" => self.sync().await,
             "quote" => self.quote(params(p)?).await,
             "submit" => self.submit(params(p)?),
             "job" => Ok(self.inner.job(&params::<JobP>(p)?.id)?.view()),
@@ -353,16 +472,27 @@ impl App {
     // ---- reads ----------------------------------------------------------------------------
 
     /// The network, and whether the sequencer's circuit and the lending program match this build.
+    /// Answers even when the sequencer can't be reached: then `last_block` is null and
+    /// `network_problem` says why (the program checks are null, not known to be wrong).
     async fn info(&self) -> Result<Value> {
         let client = self.inner.client.read().await;
         let lending = self.inner.config.lending;
         let problem = |r: Result<()>| r.err().map(|e| format!("{e:#}"));
+        let (last_block, network_problem) = match tokio::time::timeout(INFO_TIMEOUT, client.last_block()).await {
+            Ok(Ok(b)) => (Some(b), None),
+            Ok(Err(e)) => (None, Some(format!("{e:#}"))),
+            Err(_) => (None, Some(format!("the sequencer didn't answer within {} s", INFO_TIMEOUT.as_secs()))),
+        };
+        let reachable = last_block.is_some();
         Ok(json!({
             "lending": public(lending),
             "sequencer": client.wallet.client_url().to_string(),
-            "last_block": client.last_block().await?,
-            "privacy_circuit_problem": problem(client.check_circuit().await),
-            "lending_problem": problem(client.check_program(lending, LENDING_ELF).await),
+            "last_block": last_block,
+            "network_problem": network_problem,
+            "synced_block": client.synced_block(),
+            "syncing": self.inner.syncing.lock().expect("sync lock").map(|(synced, target)| json!({ "synced_block": synced, "target_block": target })),
+            "privacy_circuit_problem": if reachable { problem(client.check_circuit().await) } else { None },
+            "lending_problem": if reachable { problem(client.check_program(lending, LENDING_ELF).await) } else { None },
             "build": {
                 "lending": hex_id(&image_id(LENDING_ELF)?),
                 "oracle": hex_id(&image_id(ORACLE_ELF)?),
@@ -372,7 +502,7 @@ impl App {
         }))
     }
 
-    /// The wallet's accounts, with the native balance of public ones.
+    /// The wallet's accounts, with their native balances.
     async fn accounts(&self) -> Result<Value> {
         let client = self.inner.client.read().await;
         let storage = client.wallet.storage();
@@ -383,10 +513,10 @@ impl App {
             .collect();
         let mut out = vec![];
         for (id, labels) in ids {
+            // Private balances are as of the last sync (`synced_block`).
             let native = match id {
-                wallet::account::AccountIdWithPrivacy::Public(a) => client.native_balance(a).await.ok(),
-                // Private native balances aren't decoded here (lending doesn't use them).
-                wallet::account::AccountIdWithPrivacy::Private(_) => None,
+                wallet::account::AccountIdWithPrivacy::Public(a) => client.native(Holder::Public(a)).await.ok(),
+                wallet::account::AccountIdWithPrivacy::Private(a) => client.native(Holder::Private(a)).await.ok(),
             };
             out.push(json!({ "account": id.to_string(), "labels": labels, "native": native.map(|n| n.to_string()) }));
         }
@@ -406,8 +536,28 @@ impl App {
         }))
     }
 
-    /// Markets under the lending program: scans blocks since the last call (cached on disk).
+    /// Markets under the lending program: scans blocks since the last call (cached on disk). If the
+    /// sequencer can't be reached, the last answer, each market marked `"cached": true` (names
+    /// and decimals still right; rates and totals as they were).
     async fn markets(&self) -> Result<Value> {
+        let path = self.inner.config.data_dir.join("markets-view.json");
+        match self.markets_now().await {
+            Ok(v) => {
+                let _ = std::fs::write(&path, serde_json::to_vec(&v)?);
+                Ok(v)
+            }
+            Err(e) if ApiError::from_anyhow(&e).code == "network" => {
+                let Some(Value::Array(mut list)) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()) else { return Err(e) };
+                for m in &mut list {
+                    m["cached"] = json!(true);
+                }
+                Ok(Value::Array(list))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn markets_now(&self) -> Result<Value> {
         let lending = self.inner.config.lending;
         let mut scan = self.inner.scan.lock().await;
         let client = self.inner.client.read().await;
@@ -425,7 +575,10 @@ impl App {
         let mut out = vec![];
         for id in &scan.markets {
             let id = parse_market_id(id)?;
-            out.push(market_json(&id, &client.market(lending, &id).await?, now)?);
+            let m = client.market(lending, &id).await?;
+            let mut v = market_json(&id, &m, now)?;
+            add_decimals(&client, &m, &mut v).await;
+            out.push(v);
         }
         Ok(Value::Array(out))
     }
@@ -438,6 +591,7 @@ impl App {
         let m = client.market(lending, &id).await?;
         let now = now_ms()?;
         let mut v = market_json(&id, &m, now)?;
+        add_decimals(&client, &m, &mut v).await;
         let accounts = MarketAccounts::new(&lending, &id);
         v["accounts"] = json!({
             "market": public(accounts.market),
@@ -492,7 +646,7 @@ impl App {
         Ok(json!({
             "op": e.op,
             "private": e.is_private(),
-            "position": public(e.position),
+            "position": if e.held() { Holder::Private(e.position).to_string() } else { public(e.position) },
             "held": e.held(),
             "field": e.field.name(),
             "from": e.from.to_string(),
@@ -503,6 +657,71 @@ impl App {
             "debt_after": status.as_ref().map(|s| s.debt.to_string()),
             "health_factor_after": status.and_then(|s| s.health_factor).map(wad256),
         }))
+    }
+
+    // ---- wallet ---------------------------------------------------------------------------
+
+    /// Moves native LEZ or a token and waits for it to land (`{"tx"}`). The tx hash is known before
+    /// it goes out, so a lost reply doesn't lose track of it: the error is then `unconfirmed`
+    /// (with the hash), never one that invites sending again while it may still land.
+    async fn transfer(&self, token: Option<AccountId>, from: Holder, to: Holder, amount: u128) -> Result<Value> {
+        let _heavy = self.inner.heavy.lock().await;
+        let marked = Arc::new(Mutex::new(None::<HashType>));
+        let sent = {
+            let client = self.inner.client.read().await;
+            let have = match token {
+                None => client.native(from).await?,
+                Some(token) => client.token_balance(token, from).await?,
+            };
+            if have < amount {
+                let asof = if matches!(from, Holder::Private(_)) { " (as of the last sync)" } else { "" };
+                return Err(coded("insufficient_balance", format!("{from} holds {have}{asof}, less than {amount}")));
+            }
+            let hook = {
+                let marked = marked.clone();
+                Box::new(move |hash: HashType, _: &[SharedSecretKey]| *marked.lock().expect("hash lock") = Some(hash)) as SendHook
+            };
+            wallet::BEFORE_SEND.scope(hook, client.send_transfer(token, from, to, amount)).await
+        };
+        let hash = *marked.lock().expect("hash lock");
+        let (sent, hash) = match (sent, hash) {
+            (Ok(sent), _) => {
+                let hash = sent.hash;
+                (Some(sent), hash)
+            }
+            // Failed before it went out, or refused: nothing can land.
+            (Err(e), None) => return Err(e),
+            (Err(e), Some(_)) if e.is::<Rejected>() => return Err(e),
+            (Err(e), Some(hash)) => {
+                eprintln!("[app] transfer {hash}: sent, but {e:#}; watching for it");
+                (None, hash)
+            }
+        };
+        let since = self.inner.client.read().await.last_block().await.ok();
+        match self.inner.await_tx(hash, since).await? {
+            Landing::Landed(tx, block) => {
+                let synced = match &sent {
+                    Some(sent) => {
+                        self.inner.client.write().await.finish_transfer(sent, &tx, block).await?;
+                        true
+                    }
+                    None => false,
+                };
+                // Without its secrets (the reply was lost) a private transfer's notes show up at the next sync.
+                Ok(json!({ "tx": hash.to_string(), "block": block, "decoded": synced || matches!(*tx, LeeTransaction::Public(_)) }))
+            }
+            Landing::Dropped => Err(coded("not_included", format!("tx {hash} wasn't included in the {TRANSFER_BLOCKS} blocks after it went out: the network most likely dropped it, so nothing moved; sync to be sure before trying again"))),
+            Landing::Stalled => Err(coded("unconfirmed", format!("tx {hash} went out, but the network has made almost no blocks since: it may still land; sync later before trying again"))),
+        }
+    }
+
+    /// Catches the wallet's private state up with the chain, a step at a time (reads go on
+    /// between steps; `info.syncing` shows the progress). Then settles jobs left `unknown` on a
+    /// held position, which only a synced wallet can read.
+    async fn sync(&self) -> Result<Value> {
+        let synced = self.inner.sync_wallet().await?;
+        self.inner.resettle_unknown().await;
+        Ok(json!({ "synced_block": synced }))
     }
 
     // ---- jobs -----------------------------------------------------------------------------
@@ -523,6 +742,7 @@ impl App {
             sent_ms: None,
             proving_ms: None,
             secrets: vec![],
+            send_marked: false,
             error: None,
             note: None,
         };
@@ -574,12 +794,20 @@ fn market_json(id: &MarketId, m: &Market, now: u64) -> Result<Value> {
     }))
 }
 
+/// `loan_decimals` / `collateral_decimals` from the token programs (null if unreadable).
+async fn add_decimals(client: &Client, m: &Market, v: &mut Value) {
+    for (key, token) in [("loan_decimals", m.params.loan_asset), ("collateral_decimals", m.params.collateral_asset)] {
+        v[key] = json!(client.token_config(token).await.ok().map(|c| c.decimals));
+    }
+}
+
 /// `index: None` is a held position (E9).
 fn position_json(index: Option<u32>, id: AccountId, p: &Position, m: &Market, feed: Option<&Feed>, now: u64) -> Result<Value> {
     let mut v = json!({
         "index": index,
         "held": index.is_none(),
-        "position": public(id),
+        // A held position is the owner's private account itself.
+        "position": if index.is_none() { Holder::Private(id).to_string() } else { public(id) },
         "supply_shares": p.supply_shares.to_string(),
         "collateral": p.collateral.to_string(),
         "borrow_shares": p.borrow_shares.to_string(),
@@ -602,25 +830,43 @@ async fn prepare(client: &Client, lending: AccountId, r: &OpRequest) -> Result<P
     let on = On { lending, market, claims, payer };
     let owner_of = |holder: Holder| if r.held { Ok(Owner::held(holder)) } else { client.owner(holder, &market, r.index) };
     let need = |h: Option<Holder>, what: &str| h.ok_or_else(|| coded("bad_request", format!("{:?} needs `{what}`", r.op)));
+    let in_assets = match r.unit.as_deref() {
+        None | Some("shares") => false,
+        Some("assets") => true,
+        Some(u) => return Err(coded("bad_request", format!("unit: \"assets\" or \"shares\", got {u:?}"))),
+    };
+    // Loan-token units → shares at the projected ratio: (total assets, total shares) of supply or borrow.
+    let to_shares = |assets: u128, totals: (u128, u128), owned: u128| -> Result<u128> {
+        Ok(shares::exact_to_shares_down(assets, totals.0, totals.1).map_err(|e| anyhow!("{e}"))?.min(owned))
+    };
     match r.op {
         OpKind::Supply => {
             let from = need(from, "from")?;
             ensure!(!r.held || owner.is_none_or(|o| o == from), coded("bad_request", "a held supply goes into `from`'s own account"));
             let owner = owner_of(owner.unwrap_or(from))?;
-            client.prepare_supply(&on, from, on.position(&owner), amount.exact("supply")?).await
+            let assets = amount.exact("supply")?;
+            has_funds(client, from, client.market(lending, &market).await?.params.loan_asset, assets).await?;
+            client.prepare_supply(&on, from, on.position(&owner), assets).await
         }
         OpKind::Withdraw => {
             let owner = owner_of(need(owner, "owner")?)?;
+            let owned = client.position_shares(lending, on.position(&owner)).await?.supply_shares;
             let shares = match amount {
+                Amount::Exact(assets) if in_assets => {
+                    let s = market_status(&client.market(lending, &market).await?, now_ms()?)?.state;
+                    to_shares(assets, (s.total_supply_assets, s.total_supply_shares), owned)?
+                }
                 Amount::Exact(shares) => shares,
-                Amount::All => client.position_shares(lending, on.position(&owner)).await?.supply_shares,
+                Amount::All => owned,
             };
             client.prepare_withdraw(&on, &owner, shares, to).await
         }
         OpKind::SupplyCollateral => {
             let from = need(from, "from")?;
             let owner = owner_of(owner.unwrap_or(from))?;
-            client.prepare_supply_collateral(&on, from, on.position(&owner), amount.exact("supply_collateral")?).await
+            let assets = amount.exact("supply_collateral")?;
+            has_funds(client, from, client.market(lending, &market).await?.params.collateral_asset, assets).await?;
+            client.prepare_supply_collateral(&on, from, on.position(&owner), assets).await
         }
         OpKind::WithdrawCollateral => {
             let owner = owner_of(need(owner, "owner")?)?;
@@ -638,24 +884,60 @@ async fn prepare(client: &Client, lending: AccountId, r: &OpRequest) -> Result<P
             let from = need(from, "from")?;
             let owner = owner_of(owner.unwrap_or(from))?;
             let position = on.position(&owner);
+            let owned = client.position_shares(lending, position).await?.borrow_shares;
             let shares = match amount {
+                Amount::Exact(assets) if in_assets => {
+                    let s = market_status(&client.market(lending, &market).await?, now_ms()?)?.state;
+                    to_shares(assets, (s.total_borrow_assets, s.total_borrow_shares), owned)?
+                }
                 Amount::Exact(shares) => shares,
-                Amount::All => client.position_shares(lending, position).await?.borrow_shares,
+                Amount::All => owned,
             };
-            client.prepare_repay(&on, from, position, shares).await
+            let p = client.prepare_repay(&on, from, position, shares).await?;
+            has_funds(client, from, p.params.loan_asset, p.expect.amount).await?;
+            Ok(p)
         }
     }
+}
+
+/// An op's tokens come from `from`: refused here, rather than sent and dropped by the network (a
+/// private tx) or landed as a failure that still pays its fee (a public one).
+async fn has_funds(client: &Client, from: Holder, token: AccountId, need: u128) -> Result<()> {
+    let have = client.token_balance(token, from).await?;
+    if have < need {
+        let asof = if matches!(from, Holder::Private(_)) { " as of the last sync" } else { "" };
+        return Err(coded("insufficient_balance", format!("{from} holds {have} of {}{asof}; this needs {need}", public(token))));
+    }
+    Ok(())
 }
 
 /// Runs jobs one at a time: unfinished ones from before a restart first, then new ones. One at a
 /// time because two private txs on the same private account would spend the same note.
 async fn worker(inner: Arc<Inner>, mut queue: mpsc::UnboundedReceiver<String>, resume: Vec<String>) {
-    for id in resume {
-        inner.run(&id).await;
+    let mut stopping = inner.stopping.subscribe();
+    let work = async {
+        for id in resume {
+            inner.run(&id).await;
+        }
+        while let Some(id) = queue.recv().await {
+            inner.run(&id).await;
+        }
+    };
+    // A job dropped mid-proof sent nothing (its hash is saved before sending): the next open
+    // finds it `proving` and marks it interrupted.
+    tokio::select! {
+        () = work => {}
+        _ = stopping.wait_for(|s| *s) => {}
     }
-    while let Some(id) = queue.recv().await {
-        inner.run(&id).await;
-    }
+}
+
+/// How a sent transfer ended up ([`Inner::await_tx`]).
+enum Landing {
+    Landed(Box<LeeTransaction>, u64),
+    /// Not in the [`TRANSFER_BLOCKS`] blocks after it was sent.
+    Dropped,
+    /// The chain made too few blocks in [`TRANSFER_WAIT`] to tell.
+    Stalled,
 }
 
 impl Inner {
@@ -689,49 +971,81 @@ impl Inner {
         });
     }
 
-    async fn run(&self, id: &str) {
+    async fn run(self: &Arc<Self>, id: &str) {
         if let Err(e) = self.step(id).await {
             self.end(id, State::Failed, Some(ApiError::from_anyhow(&e)), None);
         }
     }
 
-    async fn step(&self, id: &str) -> Result<()> {
+    async fn step(self: &Arc<Self>, id: &str) -> Result<()> {
         let job = self.job(id)?;
         match job.state {
             State::Queued | State::Preparing => self.start(&job).await,
+            // Stopped before its tx was handed over (the hash is saved first): nothing went out.
+            State::Proving | State::Sending if job.send_marked && job.tx.is_none() => {
+                let note = if job.state == State::Proving { "Bosphorus stopped during the proof, before anything was sent" } else { "Bosphorus stopped before this was sent" };
+                self.end(id, State::Interrupted, None, Some(note.into()));
+                Ok(())
+            }
+            // From a build that didn't save the hash first: it may have gone out.
             State::Proving | State::Sending | State::Checking => self.check(&job).await,
             State::Submitted => self.resume_submitted(&job).await,
             _ => Ok(()),
         }
     }
 
-    /// Prepares and sends. A failure here sent nothing (the wallet sends only after proving).
-    async fn start(&self, job: &Job) -> Result<()> {
+    /// Prepares, proves (private) and sends. The tx's hash and secrets are saved just before it is
+    /// handed to the sequencer (`wallet::BEFORE_SEND`), so a failure before that sent nothing, and
+    /// one after it is settled from the chain, never assumed lost.
+    async fn start(self: &Arc<Self>, job: &Job) -> Result<()> {
+        let heavy = self.heavy.lock().await;
         self.update(&job.id, |j| j.state = State::Preparing);
         let client = self.client.read().await;
         let prepared = prepare(&client, self.config.lending, &job.request).await?;
         let expect = prepared.expect.clone();
         let state = if expect.is_private() { State::Proving } else { State::Sending };
-        // Saved before sending, so a restart from here on settles by the position.
         self.update(&job.id, |j| {
             j.expect = Some(Expected::from(&expect));
             j.state = state;
+            j.send_marked = true;
         });
         // Dev only: stretches this step so a test can stop the app in it (dev-mode proofs take
-        // ~0.3 s, real ones ~10 min).
+        // ~0.3 s, real ones ~1 min on a GPU).
         if let Some(ms) = std::env::var("BOS_APP_DELAY_SEND_MS").ok().and_then(|v| v.parse().ok()) {
             tokio::time::sleep(Duration::from_millis(ms)).await;
         }
-        let sent = client.send(&prepared).await?;
+        let started = now_ms()?;
+        let hook: SendHook = {
+            let (inner, id) = (self.clone(), job.id.clone());
+            Box::new(move |hash, secrets| {
+                let now = now_ms().unwrap_or(started);
+                inner.update(&id, |j| {
+                    j.state = State::Submitted;
+                    j.tx = Some(hash.to_string());
+                    j.secrets = secrets.iter().map(|s| hex(&s.0)).collect();
+                    j.sent_ms = Some(now);
+                    j.proving_ms = (state == State::Proving).then(|| now.saturating_sub(started));
+                });
+            })
+        };
+        let result = wallet::BEFORE_SEND.scope(hook, client.send(&prepared)).await;
         drop(client);
-        self.update(&job.id, |j| {
-            j.state = State::Submitted;
-            j.tx = Some(sent.hash.to_string());
-            j.secrets = sent.secrets.iter().map(|s| hex(&s.0)).collect();
-            j.sent_ms = Some(sent.submitted_ms);
-            j.proving_ms = sent.proving_ms;
-        });
-        self.watch(&job.id, &expect, &sent).await
+        drop(heavy);
+        match result {
+            Ok(sent) => self.watch(&job.id, &expect, &sent).await,
+            Err(e) => {
+                let job = self.job(&job.id)?;
+                // Not handed over, or refused: nothing can land.
+                if job.tx.is_none() || e.is::<Rejected>() {
+                    return Err(e);
+                }
+                // Handed over without a clean answer (a timeout, a dropped connection): it may land.
+                let why = ApiError::from_anyhow(&e).message;
+                eprintln!("[app] job {}: sent, but {why}; watching for it", job.id);
+                self.update(&job.id, |j| j.note = Some(format!("sent, but the network's answer was lost ({why}): watching for it")));
+                self.resume_submitted(&self.job(&job.id)?).await
+            }
+        }
     }
 
     async fn resume_submitted(&self, job: &Job) -> Result<()> {
@@ -742,13 +1056,33 @@ impl Inner {
         self.watch(&job.id, &expect, &sent).await
     }
 
-    /// Waits for a sent tx: by its hash, and by the position in case the hash got lost (F6).
+    /// Waits for a sent tx: by its hash, and by the position in case the hash got lost (F6). Only
+    /// the op's window closing makes it safe to call it not landed; a tx not seen for
+    /// [`TRANSFER_BLOCKS`] blocks was most likely dropped, which the job's note says meanwhile.
     async fn watch(&self, id: &str, expect: &Expect, sent: &Sent) -> Result<()> {
+        let mut since = None;
+        let mut noted = false;
         loop {
-            let client = self.client.read().await;
-            if let Ok(Some((tx, block))) = client.wallet.get_transaction(sent.hash).await {
-                drop(client);
-                let result = self.client.write().await.finish(expect, sent, &tx, block).await;
+            let (found, tip) = {
+                let client = self.client.read().await;
+                (client.wallet.get_transaction(sent.hash).await, client.last_block().await.ok())
+            };
+            if !noted
+                && let Some(tip) = tip
+                && tip >= *since.get_or_insert(tip) + TRANSFER_BLOCKS
+            {
+                noted = true;
+                let until = match expect.valid_until {
+                    Some(_) => "its offer ends".to_string(),
+                    None => format!("{} minutes after it was sent", jobs::NO_WINDOW_WAIT_MS / 60_000),
+                };
+                self.update(id, |j| j.note = Some(format!("not on the chain {TRANSFER_BLOCKS} blocks after sending, so most likely dropped; it can't land once {until}, and Bosphorus watches until then")));
+            }
+            if let Ok(Some((tx, block))) = found {
+                let result = {
+                    let _heavy = self.heavy.lock().await;
+                    self.client.write().await.finish(expect, sent, &tx, block).await
+                };
                 self.update(id, |j| j.block = Some(block));
                 match result {
                     Ok(()) => self.end(id, State::Done, None, None),
@@ -756,20 +1090,25 @@ impl Inner {
                 }
                 return Ok(());
             }
-            let value = if expect.held() { None } else { client.field_now(expect).await.ok() };
-            drop(client);
-            match settle(expect, value, now_ms()?, sent.submitted_ms) {
+            let value = if expect.held() { None } else { self.client.read().await.field_now(expect).await.ok() };
+            let mut verdict = settle(expect, value, now_ms()?, sent.submitted_ms);
+            // A held position is read from the wallet's own copy: sync it, then look again.
+            if expect.held() && matches!(verdict, Verdict::Unknown(_)) && self.sync_wallet().await.is_ok() {
+                let value = self.client.read().await.field_now(expect).await.ok();
+                verdict = settle(expect, value, now_ms()?, sent.submitted_ms);
+            }
+            match verdict {
                 Verdict::Wait => tokio::time::sleep(POLL).await,
                 Verdict::Applied => {
                     let mut note = "applied, but the sequencer can't find its tx by hash (findings F6)".to_string();
-                    if expect.is_private() {
+                    if expect.is_private() && !expect.held() {
                         note.push_str("; its notes weren't decoded: sync the wallet");
                     }
                     self.end(id, State::Done, None, Some(note));
                     return Ok(());
                 }
                 Verdict::NotApplied => {
-                    let message = "the tx didn't land before its window closed (a claim failed at settlement, or it was dropped)";
+                    let message = "it didn't land before its window closed (a claim failed at settlement, or the network dropped it): nothing moved";
                     self.end(id, State::Failed, Some(ApiError { code: "not_included".into(), message: message.into() }), None);
                     return Ok(());
                 }
@@ -781,8 +1120,8 @@ impl Inner {
         }
     }
 
-    /// A job the app stopped in while proving or sending: its tx may have gone out without its
-    /// hash being saved. Watches the position until the tx can no longer land.
+    /// A job the app stopped in while proving or sending, from a build that didn't save the hash
+    /// before sending: its tx may have gone out. Watches the position until the tx can't land.
     async fn check(&self, job: &Job) -> Result<()> {
         let expect = job.expect.as_ref().context("an in-flight job without its expectation")?.to_expect()?;
         // From when it may have been sent: the start of proving or sending.
@@ -793,10 +1132,7 @@ impl Inner {
             j.note = Some("the app stopped while this job was in flight: watching its position until the tx can no longer land".into());
         });
         loop {
-            let value = {
-                let client = self.client.read().await;
-                if expect.held() { None } else { client.field_now(&expect).await.ok() }
-            };
+            let value = if expect.held() { None } else { self.client.read().await.field_now(&expect).await.ok() };
             match settle(&expect, value, now_ms()?, since) {
                 Verdict::Wait => tokio::time::sleep(POLL).await,
                 Verdict::Applied => {
@@ -816,6 +1152,68 @@ impl Inner {
                     return Ok(());
                 }
             }
+        }
+    }
+
+    /// Syncs the wallet a step at a time under `heavy` (see [`App::sync`]).
+    async fn sync_wallet(&self) -> Result<u64> {
+        let _heavy = self.heavy.lock().await;
+        let result = async {
+            loop {
+                let (synced, tip) = self.client.write().await.sync_step(SYNC_STEP).await?;
+                *self.syncing.lock().expect("sync lock") = Some((synced, tip));
+                if synced >= tip {
+                    return anyhow::Ok(synced);
+                }
+            }
+        }
+        .await;
+        *self.syncing.lock().expect("sync lock") = None;
+        result
+    }
+
+    /// Jobs left `unknown` on a held position, settled again from the just-synced wallet.
+    async fn resettle_unknown(&self) {
+        let unknown: Vec<Job> = self.jobs.lock().expect("jobs lock").values().filter(|j| j.state == State::Unknown).cloned().collect();
+        for job in unknown {
+            let Some(expect) = job.expect.as_ref().and_then(|e| e.to_expect().ok()) else { continue };
+            if !expect.held() {
+                continue;
+            }
+            let Ok(value) = self.client.read().await.field_now(&expect).await else { continue };
+            let Ok(now) = now_ms() else { return };
+            match settle(&expect, Some(value), now, job.sent_ms.unwrap_or(job.since_ms)) {
+                Verdict::Applied => self.end(&job.id, State::Done, None, Some("found in the wallet after a sync".into())),
+                Verdict::NotApplied => {
+                    let message = "the synced wallet shows it didn't land: nothing moved";
+                    self.end(&job.id, State::Failed, Some(ApiError { code: "not_included".into(), message: message.into() }), None);
+                }
+                Verdict::Wait | Verdict::Unknown(_) => {}
+            }
+        }
+    }
+
+    /// Waits for a sent transfer by its hash, counting blocks from `since` (the tip when it was
+    /// sent), not time, so a stalled chain isn't mistaken for a dropped tx.
+    async fn await_tx(&self, hash: HashType, mut since: Option<u64>) -> Result<Landing> {
+        let deadline = tokio::time::Instant::now() + TRANSFER_WAIT;
+        loop {
+            let (found, tip) = {
+                let client = self.client.read().await;
+                (client.wallet.get_transaction(hash).await, client.last_block().await)
+            };
+            if let Ok(Some((tx, block))) = found {
+                return Ok(Landing::Landed(Box::new(tx), block));
+            }
+            if let Ok(tip) = tip
+                && tip >= *since.get_or_insert(tip) + TRANSFER_BLOCKS
+            {
+                return Ok(Landing::Dropped);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(Landing::Stalled);
+            }
+            tokio::time::sleep(POLL).await;
         }
     }
 }

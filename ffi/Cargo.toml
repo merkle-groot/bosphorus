@@ -1,0 +1,27 @@
+[package]
+name = "bosphorus-ffi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# The app API over a C ABI, for a Basecamp core module (C++) that loads Bosphorus in-process.
+# `build.rs` writes the header, `bosphorus_ffi.h`.
+[lib]
+name = "bosphorus_ffi"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+bosphorus-app = { path = "../app" }
+bosphorus-client = { path = "../client" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.50", features = ["rt-multi-thread", "time", "sync"] }
+
+[build-dependencies]
+cbindgen = { version = "0.29", default-features = false }
+
+[features]
+# A host process has no `r0vm` to fall back on: private txs prove in-process (Metal on Apple
+# silicon, through the workspace's `[patch]`). `--no-default-features` is for dev-mode only.
+default = ["prove"]
+prove = ["bosphorus-app/prove"]

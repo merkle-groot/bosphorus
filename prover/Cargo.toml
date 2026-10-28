@@ -10,5 +10,11 @@ license.workspace = true
 lee = { workspace = true, features = ["prove"] }
 lee_core.workspace = true
 risc0-zkvm = { workspace = true, features = ["prove"] }
+# Already in the graph through risc0-zkvm (patched, spikes/vendor); here only for `gpu()`.
+risc0-circuit-rv32im = { version = "4.0.4", features = ["prove"] }
 borsh.workspace = true
 anyhow.workspace = true
+
+# `warm_up()`: our Metal constraint kernels (spikes/vendor), already in the graph on Apple silicon.
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+risc0-metal = { path = "../spikes/vendor/risc0-metal" }

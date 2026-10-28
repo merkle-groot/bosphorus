@@ -14,7 +14,8 @@ risc0-build.workspace = true
 bosphorus-prover = { workspace = true, optional = true }
 
 [package.metadata.risc0]
-methods = ["../token/guest", "../oracle/guest", "../lending/guest", "../test-caller"]
+# Token and oracle are pinned to their deployed ELFs (src/lib.rs).
+methods = ["../lending/guest", "../test-caller"]
 
 # Essential tests (money safety + authorisation), run in-process on `V03State`.
 [dev-dependencies]

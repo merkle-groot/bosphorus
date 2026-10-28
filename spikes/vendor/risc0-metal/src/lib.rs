@@ -105,6 +105,13 @@ fn engine(circuit: Circuit) -> &'static Engine {
     }
 }
 
+/// Whether constraint evaluation (and rv32im accumulate) runs on these kernels: on by default,
+/// `R0_METAL_FULL=0` keeps Codex's hybrid lane (constraints on the CPU).
+pub fn full() -> bool {
+    static FULL: OnceLock<bool> = OnceLock::new();
+    *FULL.get_or_init(|| std::env::var("R0_METAL_FULL").map_or(true, |v| v != "0"))
+}
+
 /// All buffers must be quiescent before entry. Every command submitted here completes before
 /// return, so the surrounding synchronous Metal HAL and the CPU kernels can safely reuse them.
 pub fn evaluate(
@@ -225,19 +232,17 @@ pub fn evaluate(
         if split > 0 { rates.0 = 0.5 * rates.0 + 0.5 * gpu_seconds / split as f64; }
         if split < domain { rates.1 = 0.5 * rates.1 + 0.5 * cpu_seconds / (domain - split) as f64; }
     }
-    eprintln!("[metal] {circuit:?} constraints po2={po2}: {total:.3}s (GPU {gpu_seconds:.3}s, CPU {:.0}% of points {cpu_seconds:.3}s)",
-        100.0 * (domain - split) as f64 / domain as f64);
+    if risc0_zkp::timeline::enabled() {
+        eprintln!("[metal] {circuit:?} constraints po2={po2}: {total:.3}s (GPU {gpu_seconds:.3}s, CPU {:.0}% of points {cpu_seconds:.3}s)",
+            100.0 * (domain - split) as f64 / domain as f64);
+    }
 }
 
-/// Phase 1 of rv32im's accumulate step (risc0_circuit_rv32im_cpu_accum) on the GPU: risc0's
-/// generated `step_TopAccum` for cycles `0..cycles`, ported from CUDA (kernels/rv32im_accum.metal).
-/// Buffers are column-major with `rows` rows (`global` and `mix` have one). Phases 2 and 3 (the
-/// prefix sums) are the caller's.
-pub fn rv32im_accum(data: &BufferImpl<Val>, accum: &BufferImpl<Val>, global: &BufferImpl<Val>, mix: &BufferImpl<Val>,
-                    rows: usize, cycles: usize) {
-    struct Accum { queue: CommandQueue, pipeline: ComputePipelineState }
+struct Accum { queue: CommandQueue, pipeline: ComputePipelineState }
+
+fn accum_kernel() -> &'static Accum {
     static ACCUM: OnceLock<Accum> = OnceLock::new();
-    let a = ACCUM.get_or_init(|| {
+    ACCUM.get_or_init(|| {
         let started = Instant::now();
         let device = Device::system_default().expect("Metal device");
         let library = device.new_library_with_data(include_bytes!(concat!(env!("OUT_DIR"), "/rv32im_accum.metallib")))
@@ -247,7 +252,29 @@ pub fn rv32im_accum(data: &BufferImpl<Val>, accum: &BufferImpl<Val>, global: &Bu
         eprintln!("[metal] rv32im accum kernel initialized in {:.3}s ({} threads per threadgroup)",
             started.elapsed().as_secs_f64(), pipeline.max_total_threads_per_threadgroup());
         Accum { queue: device.new_command_queue(), pipeline }
-    });
+    })
+}
+
+/// Builds every pipeline now: ~60 s on the M1 the first time after a build or an install, ~0.1 s
+/// once macOS has cached them. A long-lived host pays the first time before the user's first
+/// proof. No-op without a Metal device.
+pub fn warm_up() {
+    if Device::system_default().is_none() {
+        return;
+    }
+    for circuit in [Circuit::Rv32im, Circuit::Recursion, Circuit::Keccak] {
+        engine(circuit);
+    }
+    accum_kernel();
+}
+
+/// Phase 1 of rv32im's accumulate step (risc0_circuit_rv32im_cpu_accum) on the GPU: risc0's
+/// generated `step_TopAccum` for cycles `0..cycles`, ported from CUDA (kernels/rv32im_accum.metal).
+/// Buffers are column-major with `rows` rows (`global` and `mix` have one). Phases 2 and 3 (the
+/// prefix sums) are the caller's.
+pub fn rv32im_accum(data: &BufferImpl<Val>, accum: &BufferImpl<Val>, global: &BufferImpl<Val>, mix: &BufferImpl<Val>,
+                    rows: usize, cycles: usize) {
+    let a = accum_kernel();
     let command = a.queue.new_command_buffer();
     let encoder = command.new_compute_command_encoder();
     encoder.set_compute_pipeline_state(&a.pipeline);

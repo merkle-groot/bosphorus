@@ -149,10 +149,44 @@ Guests are built locally with `risc0_build::embed_methods`, not Docker, so image
 Docker builds.
 
 ```sh
+# Rust: rustup; rust-toolchain.toml installs 1.98.1 on the first build
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+
+# risc0 toolchain (open a new terminal after the install script so rzup is on PATH)
+curl -L https://risczero.com/install | bash
+rzup install cargo-risczero 3.0.5
+rzup install r0vm 3.0.5
+rzup install rust 1.97.0
+```
+
+```sh
 cargo build --release -p bosphorus-cli -p bosphorus-keeper -p bosphorus-app
 cargo test -p bosphorus-core
 RISC0_DEV_MODE=1 cargo test -p bosphorus-methods
 ```
+
+## Benchmark proving
+
+`scripts/bench-proving.sh` proves one private borrow with a real proof and prints the time next to
+the machine it ran on. It uses the GPU if it finds one (Metal on Apple Silicon, CUDA on NVIDIA),
+otherwise the CPU through `r0vm`. On an M1 with 8 GB: ~36 s on Metal, ~7–10 min on the CPU.
+
+```sh
+./scripts/bench-proving.sh              # GPU if available, else CPU
+BENCH_CPU=1 ./scripts/bench-proving.sh  # CPU only: the number to compare across machines
+```
+
+For the Metal path, install Xcode from the App Store, then:
+
+```sh
+sudo xcode-select -s /Applications/Xcode.app
+xcodebuild -downloadComponent MetalToolchain
+xcrun -sdk macosx metal --version   # should print "Apple metal version ..."
+```
+
+For the CUDA path, install the CUDA toolkit so that `nvcc` and `nvidia-smi` are on `PATH`. Close
+the browser and other heavy apps before running; they skew the timings.
 
 ## Run locally
 

@@ -21,8 +21,7 @@ pub use bosphorus_lending::{
     Market, MarketAccounts, MarketId, MarketParams, Position, Salt, Shard, Window,
 };
 use bosphorus_lending::{config_id, position_id};
-pub use common::HashType;
-use common::transaction::LeeTransaction;
+pub use common::{HashType, transaction::LeeTransaction};
 use hmac::{Hmac, Mac as _};
 pub use lee_core::encryption::SharedSecretKey;
 use lee::{
@@ -313,7 +312,7 @@ impl Expect {
 /// send. [`Client::send`] sends it; `expect` says what it will do.
 pub struct Prepared {
     ix: Instruction,
-    params: MarketParams,
+    pub params: MarketParams,
     accounts: Accounts,
     pub payer: Option<AccountId>,
     pub expect: Expect,
@@ -516,7 +515,8 @@ impl Client {
 
     async fn send_lending(&self, lending: AccountId, accounts: Vec<AccountMention>, ix: Instruction, payer: Option<AccountId>) -> Result<()> {
         ensure!(!zero_amount(&ix), "zero amount");
-        self.send_public(&format!("lending.{}", ix.name()), lending, accounts, ix, payer).await
+        self.send_public(&format!("lending.{}", ix.name()), lending, accounts, ix, payer).await?;
+        Ok(())
     }
 
     /// `lending` and the market's assets, each checked to run this client's bytecode: a tx that
@@ -550,7 +550,7 @@ impl Client {
                 .wallet
                 .send_pub_tx_paid_by(p.accounts.mentions(), data, p.expect.lending, p.payer)
                 .await
-                .map_err(|e| anyhow!("{e:?}"))?;
+                .map_err(crate::send_error)?;
             return Ok(Sent { hash, secrets: vec![], submitted_ms, proving_ms: None, fee_from });
         }
         let started = now_ms()?;
@@ -558,7 +558,7 @@ impl Client {
             .wallet
             .send_privacy_preserving_tx(p.accounts.mentions(), data, &program)
             .await
-            .map_err(|e| anyhow!("{e:?}"))?;
+            .map_err(crate::send_error)?;
         let submitted_ms = now_ms()?;
         eprintln!("private tx {hash} proved and sent in {:.1} s", (submitted_ms - started) as f64 / 1000.0);
         ensure!(secrets.len() == p.expect.private.len(), "{} shared secrets for {} private accounts", secrets.len(), p.expect.private.len());

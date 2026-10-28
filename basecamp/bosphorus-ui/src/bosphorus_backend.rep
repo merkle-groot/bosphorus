@@ -1,0 +1,10 @@
+class BosphorusBackend
+{
+    // A pass-through to the core module (basecamp/bosphorus-core): every slot answers at once.
+    // start() returns {"ticket"}; take(ticket) the answer once there is one; events() drains job
+    // events. The view polls take() and events().
+    SLOT(QString status())
+    SLOT(QString start(QString method, QString params))
+    SLOT(QString take(QString ticket))
+    SLOT(QString events())
+}

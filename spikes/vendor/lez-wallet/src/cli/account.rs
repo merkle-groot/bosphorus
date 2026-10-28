@@ -1,0 +1,717 @@
+use std::str::FromStr;
+
+use anyhow::{Context as _, Result};
+use clap::Subcommand;
+use itertools::Itertools as _;
+use key_protocol::key_management::{KeyChain, key_tree::chain_index::ChainIndex};
+use lee::{Account, AccountId, ProgramShardSelector, PublicKey};
+use lee_core::{account::AccountIdError, native_token::NATIVE_TOKEN_PROGRAM_ID};
+
+use crate::{
+    WalletCore,
+    account::{AccountIdWithPrivacy, HumanReadableAccount, Label},
+    cli::{CliAccountMention, SubcommandReturnValue, WalletSubcommand},
+};
+
+#[derive(Debug, Clone)]
+pub enum ReadScope {
+    Balance,
+    Shard(AccountId),
+    All,
+}
+
+impl FromStr for ReadScope {
+    type Err = AccountIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "balance" => Ok(Self::Balance),
+            "all" => Ok(Self::All),
+            _ => AccountId::from_str(s).map(Self::Shard),
+        }
+    }
+}
+
+/// Represents generic chain CLI subcommand.
+#[derive(Subcommand, Debug, Clone)]
+pub enum AccountSubcommand {
+    /// Resolve an account mention and print just the account ID (no privacy prefix).
+    Id {
+        /// Account id with privacy prefix, label, or BIP-32 key path.
+        #[arg(long)]
+        account_id: CliAccountMention,
+    },
+    /// Get account data.
+    Get {
+        /// Flag to get raw account data.
+        #[arg(short, long)]
+        raw: bool,
+        /// Display keys (pk for public accounts, npk/vpk for private accounts).
+        #[arg(short, long)]
+        keys: bool,
+        /// Either 32 byte base58 account id string with privacy prefix or a label.
+        #[arg(short, long)]
+        account_id: CliAccountMention,
+        #[arg(
+            long,
+            default_value = "balance",
+            help = "Read scope: balance, all, or a program account id"
+        )]
+        scope: ReadScope,
+    },
+    /// Produce new public or private account.
+    #[command(subcommand)]
+    New(NewSubcommand),
+    /// Sync private accounts.
+    SyncPrivate,
+    /// List all accounts owned by the wallet.
+    #[command(visible_alias = "ls")]
+    List {
+        /// Show detailed account information (like `account get`).
+        #[arg(short, long)]
+        long: bool,
+    },
+    /// Set a label for an account.
+    Label {
+        /// Either 32 byte base58 account id string with privacy prefix or a label.
+        #[arg(short, long)]
+        account_id: CliAccountMention,
+        /// The label to assign to the account.
+        #[arg(short, long)]
+        label: Label,
+    },
+    /// Import external account.
+    #[command(subcommand)]
+    Import(ImportSubcommand),
+    /// Print the npk and vpk for a private account, one per line.
+    ///
+    /// Outputs two lines: npk (hex) then vpk (hex). Save to a file and share it
+    /// with senders so they can reference it with `--to-keys /path/to/file`.
+    ///
+    /// ```text
+    /// wallet account show-keys --account-id Private/... > alice.keys
+    /// ```
+    #[command(name = "show-keys")]
+    ShowKeys {
+        /// Either 32 byte base58 account id string with privacy prefix or a label.
+        #[arg(long)]
+        account_id: CliAccountMention,
+    },
+}
+
+/// Represents generic register CLI subcommand.
+#[derive(Subcommand, Debug, Clone)]
+pub enum NewSubcommand {
+    /// Register new public account.
+    Public {
+        #[arg(long)]
+        /// Chain index of a parent node.
+        cci: Option<ChainIndex>,
+        #[arg(short, long)]
+        /// Label to assign to the new account.
+        label: Option<Label>,
+    },
+    /// Single-account convenience: creates a key node and auto-registers one account with a random
+    /// identifier.
+    Private {
+        #[arg(long)]
+        /// Chain index of a parent node.
+        cci: Option<ChainIndex>,
+        #[arg(short, long)]
+        /// Label to assign to the new account.
+        label: Option<Label>,
+    },
+    /// Create a shared private account from a group's GMS.
+    PrivateGms {
+        /// Group name to derive keys from.
+        group: Label,
+        #[arg(short, long)]
+        /// Label to assign to the new account.
+        label: Option<Label>,
+        #[arg(long)]
+        /// Create a PDA account (requires --seed and --program-id).
+        pda: bool,
+        #[arg(long, requires = "pda")]
+        /// PDA seed as 64-character hex string.
+        seed: Option<String>,
+        #[arg(long, requires = "pda")]
+        /// Program ID as hex string.
+        program_id: Option<String>,
+        #[arg(long)]
+        /// Identifier selecting the shared account.
+        /// Co-owners must supply the same value to derive the same account.
+        /// Defaults to a random value if not specified.
+        identifier: Option<lee_core::Identifier>,
+    },
+    /// Recommended for receiving from multiple senders: creates a key node (npk + vpk) without
+    /// registering any account.
+    PrivateAccountsKey {
+        #[arg(long)]
+        /// Chain index of a parent node.
+        cci: Option<ChainIndex>,
+    },
+}
+
+impl NewSubcommand {
+    fn handle_public(
+        cci: Option<ChainIndex>,
+        label: Option<Label>,
+        wallet_core: &mut WalletCore,
+    ) -> Result<SubcommandReturnValue> {
+        if let Some(label) = &label {
+            wallet_core.storage().check_label_availability(label)?;
+        }
+
+        let (account_id, chain_index) = wallet_core.create_new_account_public(cci);
+
+        let private_key = wallet_core
+            .storage
+            .key_chain()
+            .pub_account_signing_key(account_id)
+            .unwrap();
+
+        let public_key = PublicKey::new_from_private_key(private_key);
+
+        if let Some(label) = label {
+            wallet_core
+                .storage_mut()
+                .add_label(label, AccountIdWithPrivacy::Public(account_id))?;
+        }
+
+        println!("Generated new account with account_id Public/{account_id} at path {chain_index}");
+        println!("With pk {}", hex::encode(public_key.value()));
+
+        wallet_core.store_persistent_data()?;
+
+        Ok(SubcommandReturnValue::RegisterAccount { account_id })
+    }
+
+    fn handle_private(
+        cci: Option<ChainIndex>,
+        label: Option<Label>,
+        wallet_core: &mut WalletCore,
+    ) -> Result<SubcommandReturnValue> {
+        if let Some(label) = &label {
+            wallet_core.storage().check_label_availability(label)?;
+        }
+
+        let (account_id, chain_index) = wallet_core.create_new_account_private(cci);
+
+        if let Some(label) = label {
+            wallet_core
+                .storage_mut()
+                .add_label(label, AccountIdWithPrivacy::Private(account_id))?;
+        }
+
+        let found_acc = wallet_core
+            .storage()
+            .key_chain()
+            .private_account(account_id)
+            .expect("Account should exist after creation");
+        let key_chain = found_acc.key_chain;
+
+        println!(
+            "Generated new account with account_id Private/{account_id} at path {chain_index}"
+        );
+        println!("With npk {}", hex::encode(key_chain.nullifier_public_key.0));
+        println!(
+            "With vpk {}",
+            hex::encode(key_chain.viewing_public_key.to_bytes())
+        );
+
+        wallet_core.store_persistent_data()?;
+
+        Ok(SubcommandReturnValue::RegisterAccount { account_id })
+    }
+
+    async fn handle_private_gms(
+        group: &Label,
+        label: Option<Label>,
+        pda: bool,
+        seed: Option<String>,
+        program_id: Option<String>,
+        identifier: Option<lee_core::Identifier>,
+        wallet_core: &mut WalletCore,
+    ) -> Result<SubcommandReturnValue> {
+        if let Some(label) = &label {
+            wallet_core.storage().check_label_availability(label)?;
+        }
+
+        let info = if pda {
+            let seed_hex = seed.context("--seed is required for PDA accounts")?;
+            let pid_hex = program_id.context("--program-id is required for PDA accounts")?;
+
+            let seed_bytes: [u8; 32] = hex::decode(&seed_hex)
+                .context("Invalid seed hex")?
+                .try_into()
+                .map_err(|_err| anyhow::anyhow!("Seed must be exactly 32 bytes"))?;
+            let pda_seed = lee_core::program::PdaSeed::new(seed_bytes);
+
+            let pid_bytes = hex::decode(&pid_hex).context("Invalid program ID hex")?;
+            if pid_bytes.len() != 32 {
+                anyhow::bail!("Program ID must be exactly 32 bytes");
+            }
+            let mut pid: lee_core::program::ProgramId = [0; 8];
+            for (word, chunk) in pid.iter_mut().zip(pid_bytes.as_chunks::<4>().0) {
+                *word = u32::from_le_bytes(*chunk);
+            }
+
+            wallet_core
+                .create_shared_pda_account(
+                    group.clone(),
+                    pda_seed,
+                    pid,
+                    crate::cli::identifier_or_random(identifier),
+                )
+                .await?
+        } else {
+            wallet_core
+                .create_shared_regular_account_with_identifier(
+                    group.clone(),
+                    crate::cli::identifier_or_random(identifier),
+                )
+                .await?
+        };
+
+        if let Some(label) = label {
+            wallet_core
+                .storage_mut()
+                .add_label(label, AccountIdWithPrivacy::Private(info.account_id))?;
+        }
+
+        println!("Shared account from group '{group}'");
+        println!("AccountId: Private/{}", info.account_id);
+        println!("NPK: {}", hex::encode(info.npk.0));
+        println!("VPK: {}", hex::encode(info.vpk.to_bytes()));
+
+        wallet_core.store_persistent_data()?;
+        Ok(SubcommandReturnValue::RegisterAccount {
+            account_id: info.account_id,
+        })
+    }
+
+    fn handle_private_accounts_key(
+        cci: Option<ChainIndex>,
+        wallet_core: &mut WalletCore,
+    ) -> Result<SubcommandReturnValue> {
+        let chain_index = wallet_core.create_private_accounts_key(cci);
+        let key_chain = wallet_core
+            .storage()
+            .key_chain()
+            .private_account_key_chain_by_index(&chain_index)
+            .expect("Key chain should exist after creation");
+
+        println!("Generated new private key node at path {chain_index}");
+        println!("With npk {}", hex::encode(key_chain.nullifier_public_key.0));
+        println!(
+            "With vpk {}",
+            hex::encode(key_chain.viewing_public_key.to_bytes())
+        );
+
+        wallet_core.store_persistent_data()?;
+
+        Ok(SubcommandReturnValue::Empty)
+    }
+}
+
+impl WalletSubcommand for NewSubcommand {
+    async fn handle_subcommand(
+        self,
+        wallet_core: &mut WalletCore,
+    ) -> Result<SubcommandReturnValue> {
+        match self {
+            Self::Public { cci, label } => Self::handle_public(cci, label, wallet_core),
+            Self::Private { cci, label } => Self::handle_private(cci, label, wallet_core),
+            Self::PrivateGms {
+                group,
+                label,
+                pda,
+                seed,
+                program_id,
+                identifier,
+            } => {
+                Self::handle_private_gms(
+                    &group,
+                    label,
+                    pda,
+                    seed,
+                    program_id,
+                    identifier,
+                    wallet_core,
+                )
+                .await
+            }
+            Self::PrivateAccountsKey { cci } => Self::handle_private_accounts_key(cci, wallet_core),
+        }
+    }
+}
+
+impl AccountSubcommand {
+    async fn handle_get(
+        raw: bool,
+        keys: bool,
+        account_id: CliAccountMention,
+        scope: ReadScope,
+        wallet_core: &WalletCore,
+    ) -> Result<SubcommandReturnValue> {
+        let resolved = account_id.resolve(wallet_core.storage())?;
+        wallet_core
+            .storage()
+            .labels_for_account(resolved)
+            .for_each(|label| {
+                println!("Label: {label}");
+            });
+
+        let account = match resolved {
+            AccountIdWithPrivacy::Public(id) => match &scope {
+                ReadScope::All => wallet_core.get_account_public(id).await?,
+                ReadScope::Balance => {
+                    wallet_core
+                        .get_account_view(ProgramShardSelector::native_balance(id))
+                        .await?
+                }
+                ReadScope::Shard(program) => {
+                    wallet_core
+                        .get_account_view(ProgramShardSelector::new(id, *program))
+                        .await?
+                }
+            },
+            AccountIdWithPrivacy::Private(id) => {
+                let Some(found) = wallet_core.storage().key_chain().private_account(id) else {
+                    anyhow::bail!("Private account with id {id} not found in storage");
+                };
+                match &scope {
+                    ReadScope::All => found.account.clone(),
+                    ReadScope::Balance => found.account.project([NATIVE_TOKEN_PROGRAM_ID]),
+                    ReadScope::Shard(program) => found.account.project([*program]),
+                }
+            }
+        };
+
+        // Helper closure to display keys for the account
+        let display_keys = |wallet_core: &WalletCore| -> Result<()> {
+            match resolved {
+                AccountIdWithPrivacy::Public(account_id) => {
+                    let private_key = wallet_core
+                        .storage
+                        .key_chain()
+                        .pub_account_signing_key(account_id)
+                        .context("Public account not found in storage")?;
+
+                    let public_key = PublicKey::new_from_private_key(private_key);
+                    println!("pk {}", hex::encode(public_key.value()));
+                }
+                AccountIdWithPrivacy::Private(account_id) => {
+                    let acc = wallet_core
+                        .storage
+                        .key_chain()
+                        .private_account(account_id)
+                        .context("Private account not found in storage")?;
+
+                    println!("npk {}", hex::encode(acc.key_chain.nullifier_public_key.0));
+                    println!(
+                        "vpk {}",
+                        hex::encode(acc.key_chain.viewing_public_key.to_bytes())
+                    );
+                }
+            }
+            Ok(())
+        };
+
+        if matches!(scope, ReadScope::All) && account == Account::default() {
+            println!("Account is Uninitialized");
+
+            if keys {
+                display_keys(wallet_core)?;
+            }
+
+            return Ok(SubcommandReturnValue::Empty);
+        }
+
+        if raw {
+            let account_hr: HumanReadableAccount = account.into();
+            println!("{account_hr}");
+
+            return Ok(SubcommandReturnValue::Empty);
+        }
+
+        let balance_read = match &scope {
+            ReadScope::All | ReadScope::Balance => true,
+            ReadScope::Shard(program) => *program == NATIVE_TOKEN_PROGRAM_ID,
+        };
+        print_account_details(&account, "", balance_read);
+
+        if keys {
+            display_keys(wallet_core)?;
+        }
+
+        Ok(SubcommandReturnValue::Empty)
+    }
+
+    fn format_with_label(
+        wallet_core: &WalletCore,
+        id: AccountIdWithPrivacy,
+        chain_index: Option<&ChainIndex>,
+    ) -> String {
+        let id_str = chain_index.map_or_else(|| id.to_string(), |cci| format!("{cci} {id}"));
+
+        let labels = wallet_core
+            .storage()
+            .labels_for_account(id)
+            .format(", ")
+            .to_string();
+        if labels.is_empty() {
+            id_str
+        } else {
+            format!("{id_str} [{labels}]")
+        }
+    }
+
+    async fn handle_list(long: bool, wallet_core: &WalletCore) -> Result<SubcommandReturnValue> {
+        let (public_account_ids, private_account_ids) = {
+            let key_chain = &wallet_core.storage.key_chain();
+
+            if !long {
+                let accounts = key_chain
+                    .account_ids()
+                    .map(|(id, idx)| Self::format_with_label(wallet_core, id, idx))
+                    .format("\n");
+                println!("{accounts}");
+
+                return Ok(SubcommandReturnValue::Empty);
+            }
+
+            let public_account_ids: Vec<_> = key_chain
+                .public_account_ids()
+                .map(|(id, chain_index)| (id, chain_index.cloned()))
+                .collect();
+            let private_account_ids: Vec<_> = key_chain
+                .private_account_ids()
+                .map(|(id, chain_index)| (id, chain_index.cloned()))
+                .collect();
+
+            (public_account_ids, private_account_ids)
+        };
+
+        // Detailed listing with --long flag
+
+        for (id, chain_index) in public_account_ids {
+            println!(
+                "{}",
+                Self::format_with_label(
+                    wallet_core,
+                    AccountIdWithPrivacy::Public(id),
+                    chain_index.as_ref()
+                )
+            );
+            match wallet_core
+                .get_account_view(ProgramShardSelector::native_balance(id))
+                .await
+            {
+                Ok(account) => print_account_details(&account, "  ", true),
+                Err(e) => println!("  Error fetching account: {e}"),
+            }
+        }
+
+        // Private key tree accounts
+        for (id, chain_index) in private_account_ids {
+            println!(
+                "{}",
+                Self::format_with_label(
+                    wallet_core,
+                    AccountIdWithPrivacy::Private(id),
+                    chain_index.as_ref()
+                )
+            );
+            match wallet_core.storage().key_chain().private_account(id) {
+                Some(found) => {
+                    print_account_details(
+                        &found.account.project([NATIVE_TOKEN_PROGRAM_ID]),
+                        "  ",
+                        true,
+                    );
+                }
+                None => println!("  Not found in local storage"),
+            }
+        }
+
+        Ok(SubcommandReturnValue::Empty)
+    }
+
+    fn handle_label(
+        account_id: &CliAccountMention,
+        label: &Label,
+        wallet_core: &mut WalletCore,
+    ) -> Result<SubcommandReturnValue> {
+        let account_id = account_id.resolve(wallet_core.storage())?;
+
+        wallet_core
+            .storage_mut()
+            .add_label(label.clone(), account_id)?;
+
+        wallet_core.store_persistent_data()?;
+
+        println!("Label '{label}' set for account {account_id}");
+
+        Ok(SubcommandReturnValue::Empty)
+    }
+
+    fn handle_show_keys(
+        account_id: &CliAccountMention,
+        wallet_core: &WalletCore,
+    ) -> Result<SubcommandReturnValue> {
+        let resolved = account_id.resolve(wallet_core.storage())?;
+        let AccountIdWithPrivacy::Private(account_id) = resolved else {
+            anyhow::bail!(
+                "wallet::cli::account::AccountSubcommand::ShowKeys: show-keys is only available for private accounts"
+            );
+        };
+        let entry = wallet_core
+            .storage()
+            .key_chain()
+            .private_account(account_id)
+            .ok_or_else(|| anyhow::anyhow!("wallet::cli::account::AccountSubcommand::ShowKeys: private account not found in wallet"))?;
+        println!("{}", hex::encode(entry.key_chain.nullifier_public_key.0));
+        println!(
+            "{}",
+            hex::encode(entry.key_chain.viewing_public_key.to_bytes())
+        );
+        Ok(SubcommandReturnValue::Empty)
+    }
+}
+
+impl WalletSubcommand for AccountSubcommand {
+    async fn handle_subcommand(
+        self,
+        wallet_core: &mut WalletCore,
+    ) -> Result<SubcommandReturnValue> {
+        match self {
+            Self::Id { account_id } => {
+                let resolved = account_id.resolve(wallet_core.storage())?;
+                let id = match resolved {
+                    AccountIdWithPrivacy::Public(id) | AccountIdWithPrivacy::Private(id) => id,
+                };
+                println!("{id}");
+                Ok(SubcommandReturnValue::Empty)
+            }
+            Self::Get {
+                raw,
+                keys,
+                account_id,
+                scope,
+            } => Self::handle_get(raw, keys, account_id, scope, wallet_core).await,
+            Self::New(new_subcommand) => new_subcommand.handle_subcommand(wallet_core).await,
+            Self::SyncPrivate => {
+                let curr_last_block = wallet_core.sync_to_latest_block().await?;
+                Ok(SubcommandReturnValue::SyncedToBlock(curr_last_block))
+            }
+            Self::List { long } => Self::handle_list(long, wallet_core).await,
+            Self::Label { account_id, label } => {
+                Self::handle_label(&account_id, &label, wallet_core)
+            }
+            Self::Import(import_subcommand) => {
+                import_subcommand.handle_subcommand(wallet_core).await
+            }
+            Self::ShowKeys { account_id } => Self::handle_show_keys(&account_id, wallet_core),
+        }
+    }
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ImportSubcommand {
+    /// Import a public account signing key.
+    Public {
+        /// Private key in hex format.
+        #[arg(long)]
+        private_key: lee::PrivateKey,
+    },
+    /// Import a private account keychain and account state.
+    Private {
+        /// Private account keychain JSON.
+        #[arg(long)]
+        key_chain_json: String,
+        /// Private account state JSON (`HumanReadableAccount`).
+        #[arg(long)]
+        account_state: HumanReadableAccount,
+        /// Chain index.
+        #[arg(long)]
+        chain_index: Option<ChainIndex>,
+        /// Identifier. Defaults to zero if not specified.
+        #[arg(long)]
+        identifier: Option<lee_core::Identifier>,
+    },
+}
+
+impl WalletSubcommand for ImportSubcommand {
+    async fn handle_subcommand(
+        self,
+        wallet_core: &mut WalletCore,
+    ) -> Result<SubcommandReturnValue> {
+        match self {
+            Self::Public { private_key } => {
+                let account_id =
+                    lee::AccountId::from(&lee::PublicKey::new_from_private_key(&private_key));
+
+                wallet_core
+                    .storage_mut()
+                    .key_chain_mut()
+                    .add_imported_public_account(private_key);
+
+                wallet_core.store_persistent_data()?;
+
+                println!("Imported public account Public/{account_id}");
+
+                Ok(SubcommandReturnValue::Empty)
+            }
+            Self::Private {
+                key_chain_json,
+                account_state,
+                chain_index,
+                identifier,
+            } => {
+                let key_chain: KeyChain = serde_json::from_str(&key_chain_json)
+                    .map_err(|err| anyhow::anyhow!("Invalid key chain JSON: {err}"))?;
+                let account = lee::Account::from(account_state);
+                let identifier = identifier.unwrap_or(lee_core::Identifier::ZERO);
+                let account_id = lee::AccountId::from((
+                    &key_chain.nullifier_public_key,
+                    &key_chain.viewing_public_key,
+                    identifier,
+                ));
+
+                wallet_core
+                    .storage_mut()
+                    .key_chain_mut()
+                    .add_imported_private_account(key_chain, chain_index, identifier, account);
+
+                wallet_core.store_persistent_data()?;
+
+                println!("Imported private account Private/{account_id}");
+
+                Ok(SubcommandReturnValue::Empty)
+            }
+        }
+    }
+}
+
+fn print_account_details(account: &Account, indent: &str, balance_read: bool) {
+    if balance_read {
+        let balance = account.data.native_balance().map_or_else(
+            |_error| "<malformed>".to_owned(),
+            |balance| balance.to_string(),
+        );
+        println!("{indent}Balance {balance}, nonce {}", account.nonce.0);
+    } else {
+        println!("{indent}Balance not read, nonce {}", account.nonce.0);
+    }
+    for (program, data) in account
+        .data
+        .shards
+        .iter()
+        .filter(|(program, data)| **program != NATIVE_TOKEN_PROGRAM_ID && !data.is_empty())
+    {
+        let (description, json_view) = (format!("Record of program {program}"), hex::encode(data));
+        println!("{indent}{description}");
+        println!("{indent}{json_view}");
+    }
+}

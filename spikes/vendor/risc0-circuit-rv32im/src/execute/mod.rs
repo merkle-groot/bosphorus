@@ -37,10 +37,11 @@ pub use self::{
 };
 
 /// Prover-side choice only: segments of any allowed po2 verify the same. Bosphorus builds pick it
-/// at compile time with `R0_SEGMENT_PO2` (an 8 GB Mac pages through a po2-20 segment).
+/// at compile time with `R0_SEGMENT_PO2`, default 19 (risc0's is 20: an 8 GB Mac pages through a
+/// po2-20 segment, and a po2-19 one needs ~4 GB of GPU memory).
 pub const DEFAULT_SEGMENT_LIMIT_PO2: usize = match option_env!("R0_SEGMENT_PO2") {
     Some(po2) => parse_po2(po2.as_bytes()),
-    None => 20,
+    None => 19,
 };
 
 const fn parse_po2(digits: &[u8]) -> usize {

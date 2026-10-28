@@ -1,0 +1,24 @@
+{
+  "name": "bosphorus_ui",
+  "display_name": "Bosphorus",
+  "version": "0.1.0",
+  "type": "ui_qml",
+  "interface": "universal",
+  "category": "finance",
+  "description": "Lend and borrow on Bosphorus (LEZ), publicly or from private accounts, with its own wallet.",
+  "author": "Bosphorus",
+  "main": "bosphorus_ui_plugin",
+  "icon": "icons/bosphorus.png",
+  "view": "qml/BosphorusView.qml",
+  "dependencies": ["bosphorus"],
+  "codegen": {
+    "rep": "src/bosphorus_backend.rep",
+    "backend_class": "BosphorusBackend",
+    "backend_header": "bosphorus_backend.h"
+  },
+  "nix": {
+    "packages": { "build": [], "runtime": ["qt6.qtdeclarative"] },
+    "external_libraries": [],
+    "cmake": { "find_packages": [], "extra_sources": [], "extra_include_dirs": [], "extra_link_libraries": [] }
+  }
+}

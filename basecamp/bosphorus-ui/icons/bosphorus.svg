@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Bosphorus</title>
+  <rect width="256" height="256" rx="44" fill="#0B1424"/>
+  <g transform="translate(32 32) scale(.75)">
+    <path fill="#F4F2EB" d="M32 112C88 112 104 48 160 48H224V80H160C120 80 104 144 32 144Z"/>
+    <path fill="#9CAEFF" d="M32 176C88 176 104 112 160 112H224V144H160C120 144 104 208 32 208Z"/>
+  </g>
+</svg>

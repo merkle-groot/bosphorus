@@ -54,7 +54,9 @@ crates. With no change to the token guest's source, its image id went from the d
 (E9 had changed it already). In-process tests don't care; proofs for the deployed testnet programs
 do. Before deploying or proving on the testnet, build the guests without the patches: guests out of
 the workspace with their own lockfile, or `programs/methods/build.rs` embedding pinned ELFs (e.g.
-`.testnet/elfs/`), or a deploy build with the patch entries removed. LEZ's circuit is unaffected:
+`.testnet/elfs/`), or a deploy build with the patch entries removed. **Done 2026-10-26: pinned
+ELFs** for token and oracle (`programs/methods/deployed/`, ids match `DEPLOYMENTS.md`); lending
+is built (E9 changed it) and needs a redeploy. LEZ's circuit is unaffected:
 its guest builds in LEZ's own workspace, and its image id is the same in our build and in
 `~/Work/logos-execution-zone/target` (checked).
 
@@ -118,6 +120,15 @@ risc0's CPU accumulate on a copy and asserts equality (bit-exact at po2 16 and 1
 pipeline (16 s, then cached by macOS).
 
 ## Resume here
+
+**2026-10-26: items 1–3 are done.** The flags are defaults (`R0_METAL_FULL` on unless `=0`, segment
+po2 19, store 16; plain `cargo build` is enough). Token and oracle ship their deployed ELFs. The
+wallet path goes through `bosphorus_prover` (vendored `lez-wallet`, `set_private_prover`), with
+risc0's keccak union tree (`Job::Union`, the same MMR shape as `prover_impl.rs`) and keccak proofs
+up to po2 15 allowed beside a po2-19 segment. Real proofs on the localnet: 42.5–54.0 s for
+single-note ops, 75.9 s for a borrow to a second private account (5 po2-19 segments, 2 keccak + 1
+union; GPU-bound: ~45 s of exclusive segments, then the resolve chain). `[metal] … constraints`
+lines only print with `R0_TL=1`.
 
 1. Build with these exact flags (they aren't the defaults yet; baking them in is a to-do):
    `R0_SEGMENT_PO2=19 R0_METAL_BUDGET=400 R0_METAL_STORE=16 cargo build --release -p spike-harness --features prove`

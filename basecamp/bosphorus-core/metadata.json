@@ -1,0 +1,33 @@
+{
+  "name": "bosphorus",
+  "display_name": "Bosphorus",
+  "version": "0.1.0",
+  "description": "Bosphorus lending on LEZ: isolated markets with private positions, proven on this machine's GPU. Keeps its own wallet.",
+  "author": "Bosphorus",
+  "type": "core",
+  "category": "finance",
+  "interface": "universal",
+  "codegen": {
+    "impl_header": "src/bosphorus_module.h",
+    "impl_class": "BosphorusModule"
+  },
+  "main": "bosphorus_plugin",
+  "dependencies": [],
+  "capabilities": [],
+  "include": [],
+  "nix": {
+    "packages": {
+      "build": ["nlohmann_json"],
+      "runtime": []
+    },
+    "external_libraries": [
+      { "name": "bosphorus_ffi", "vendor_path": "lib" }
+    ],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": ["lib"],
+      "extra_link_libraries": []
+    }
+  }
+}

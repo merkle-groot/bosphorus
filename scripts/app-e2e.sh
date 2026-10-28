@@ -6,8 +6,9 @@
 #   3. a public supply, and a private one into a salted position, as jobs;
 #   4. the app is killed right after a private withdraw is sent: on restart the job settles from
 #      its saved hash and secrets, and the wallet gets the withdrawn tokens;
-#   5. the app is killed while a job is proving (stretched with BOS_APP_DELAY_SEND_MS): on restart
-#      the job is `checking`, nothing is sent again, and the position hasn't moved.
+#   5. the app is killed while a job is proving (stretched with BOS_APP_DELAY_SEND_MS): its hash is
+#      saved only right before sending, so on restart the job is `interrupted` at once, nothing is
+#      sent, and the position hasn't moved.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/net.sh
@@ -134,20 +135,20 @@ stop_app
 # Only the decoded note moves the wallet's private balance.
 expect "$(bos token balance --token "$TKB" --account "$LENDER")" "$(jq -r .expect.amount <<< "$DONE")" "private TKB after the resumed withdraw"
 
-step "killed while proving: the restart watches the position and sends nothing"
+step "killed while proving: the restart marks it interrupted and sends nothing"
 start_app BOS_APP_DELAY_SEND_MS=60000
 JOB=$(result submit "{\"op\":\"withdraw\",\"market\":\"$E9_MARKET\",\"owner\":\"$LENDER\",\"amount\":\"all\"}" | jq -r .id)
 await_state "$JOB" proving
 kill_app
 start_app
-await_state "$JOB" checking
+await_state "$JOB" interrupted
 sleep 20
 J=$(result job "{\"id\":\"$JOB\"}")
-expect "$(jq -r '.state, .tx' <<< "$J" | paste -sd' ' -)" "checking null" "in-flight job after the restart"
+expect "$(jq -r '.state, .tx' <<< "$J" | paste -sd' ' -)" "interrupted null" "in-flight job after the restart"
 expect "$(position)" $((SHARES - HALF)) "supply shares untouched"
 stop_app
 
 step "stdout carried only protocol lines"
 cat "$RUN/out" >> "$RUN/all"
 jq -e . "$RUN/all" > /dev/null || { echo "FAIL: non-JSON on bos-app stdout" >&2; exit 1; }
-step "app e2e passed (jobs in $DATA; the last one settles as interrupted ~21 min after it started)"
+step "app e2e passed (jobs in $DATA)"

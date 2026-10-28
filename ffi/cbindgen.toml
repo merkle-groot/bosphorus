@@ -1,0 +1,19 @@
+language = "C"
+include_guard = "BOSPHORUS_FFI_H"
+pragma_once = true
+documentation = true
+usize_is_size_t = true
+
+[parse]
+parse_deps = false
+
+[export]
+include = [
+  "BosApp",
+  "BosAppOpenOutput",
+  "bos_app_open",
+  "bos_app_close",
+  "bos_app_call",
+  "bos_app_poll_events",
+  "bos_app_string_free",
+]

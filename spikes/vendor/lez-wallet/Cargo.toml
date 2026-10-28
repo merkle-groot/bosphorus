@@ -1,0 +1,52 @@
+# LEZ v0.3.1's `wallet` crate (lez/wallet at tag v0.3.1, 1a003bf), vendored through
+# `[patch]` in the workspace manifest. Host-side changes, both in src/lib.rs and marked
+# "Bosphorus": `set_private_prover`, so the app proves private txs with `bosphorus-prover`; and
+# decoded private accounts logged at debug instead of printed to stdout. Workspace deps resolved
+# by hand.
+[package]
+name = "wallet"
+version = "0.1.0"
+edition = "2024"
+license = "MIT or Apache-2.0"
+
+[dependencies]
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1" }
+lee = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1" }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1" }
+key_protocol = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1" }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1", features = ["client"] }
+testnet_initial_state = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1" }
+bridge_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1" }
+keycard_wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1" }
+programs = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1", default-features = false, features = ["artifacts"] }
+system_accounts = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1" }
+program_loader_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.3.1" }
+risc0-binfmt = "3.0.2"
+risc0-zkos-v1compat = "=2.2.2"
+
+bip39 = "2.2.0"
+rpassword = "7"
+zeroize = "1"
+
+anyhow = "1.0.98"
+thiserror = "2.0"
+serde_json = "1.0.81"
+env_logger = "0.11"
+log = "0.4.28"
+serde = { version = "1.0.60", default-features = false, features = ["derive"] }
+humantime-serde = "1.1"
+humantime = "2.1"
+tokio = { version = "1.50", features = ["net", "rt-multi-thread", "sync", "fs", "macros"] }
+clap = { version = "4.5.42", features = ["derive", "env"] }
+hex = "0.4.3"
+rand = { version = "0.8.5", features = ["std", "std_rng", "getrandom"] }
+itertools = "0.14.0"
+futures = "0.3"
+async-stream = "0.3.6"
+indicatif = { version = "0.18.3", features = ["improved_unicode"] }
+optfield = "0.4.0"
+url = { version = "2.5.4", features = ["serde"] }
+derive_more = { version = "2.1.1", features = ["display"] }
+
+[features]
+keycard-debug = []

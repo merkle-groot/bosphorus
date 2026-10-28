@@ -42,6 +42,26 @@ use risc0_zkvm::{
     sha::{Digest, Digestible},
 };
 
+/// Keccak proof size for the circuit: 65 permutations per private account; po2 14 holds 81,
+/// whereas risc0's default 17 proves 131,072 rows. Any supported size verifies the same.
+pub const KECCAK_PO2: u32 = 14;
+
+/// Whether segment proofs run on the GPU: Apple silicon with a Tier-2 Metal device (else the CPU,
+/// with a one-time note on stderr), unless `R0_DISABLE_METAL=1`.
+pub fn gpu() -> bool {
+    risc0_circuit_rv32im::prove::metal_lane_selected()
+}
+
+/// Builds the GPU pipelines now, off the caller's thread: the first proof after a build or an
+/// install otherwise spends ~60 s on them (M1; macOS caches them after). For long-lived hosts (the
+/// Basecamp module); a no-op without a GPU or in dev mode.
+pub fn warm_up() {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if gpu() && !ProverOpts::default().dev_mode() {
+        std::thread::Builder::new().name("bosphorus-gpu-warm-up".into()).spawn(risc0_metal::warm_up).ok();
+    }
+}
+
 /// Drop-in for `lee::execute_and_prove`. Dev mode (fake proofs) goes straight to LEZ's.
 pub fn execute_and_prove(
     input: ProvingInput,
@@ -60,7 +80,10 @@ pub fn execute_and_prove(
         instruction_data,
         authorized_accounts: signers.into_iter().collect(),
     };
-    let mut backend = Executor { programs, env_builder: ExecutorEnv::builder(), calls: Vec::new(), guests: Vec::new() };
+    // The circuit's env. `RISC0_KECCAK_PO2`, if set, still wins (read at `build`).
+    let mut env_builder = ExecutorEnv::builder();
+    env_builder.keccak_max_po2(KECCAK_PO2).map_err(|e| LeeError::CircuitProvingError(e.to_string()))?;
+    let mut backend = Executor { programs, env_builder, calls: Vec::new(), guests: Vec::new() };
     ExecutionState::initialize(root.clone(), &private_witnesses)?.run(&mut backend)?;
     let Executor { mut env_builder, calls, guests, .. } = backend;
 
@@ -229,6 +252,8 @@ enum Job {
     /// The segment proof (witness, commits, constraints, FRI), from its preflight.
     Segment(usize),
     Keccak(usize),
+    /// Two keccak receipts (or unions of them) into one.
+    Union,
     Lift,
     Join,
     Resolve,
@@ -248,7 +273,7 @@ struct Node {
     cost: f64,
     /// Runs with no other GPU job but light ones (a po2-19 segment).
     exclusive: bool,
-    /// Small enough to run beside an exclusive job (a segment up to po2 17, ~1 GB).
+    /// Small enough to run beside an exclusive job (a segment up to po2 17, ~1 GB; a small keccak).
     light: bool,
     cpu_only: bool,
 }
@@ -295,6 +320,30 @@ impl Work {
         }
         Ok(joined.unwrap())
     }
+
+    /// The keccak proofs, unioned as risc0's prover does (`MerkleMountainAccumulator<UnionPeak>`
+    /// in `prover_impl.rs`): the same tree shape gives the root claim the circuit assumed.
+    fn keccak_root(&mut self) -> Option<usize> {
+        let mut peaks: std::collections::VecDeque<(usize, u32)> = Default::default();
+        for r in 0..self.requests.len() {
+            let keccak = self.add(Job::Keccak(r), vec![], 2.0, false, false);
+            // Up to po2 15 (32k rows) it fits beside a po2-19 segment, off the critical path.
+            self.nodes[keccak].light = self.requests[r].po2 <= 15;
+            let mut to_add = (keccak, 0);
+            while let Some(&(older, height)) = peaks.back()
+                && height == to_add.1
+            {
+                peaks.pop_back();
+                to_add = (self.add(Job::Union, vec![to_add.0, older], 1.9, false, false), height + 1);
+            }
+            peaks.push_back(to_add);
+        }
+        let (mut root, _) = peaks.pop_front()?;
+        for (peak, _) in peaks {
+            root = self.add(Job::Union, vec![root, peak], 1.9, false, false);
+        }
+        Some(root)
+    }
 }
 
 fn prove(circuit: Session, guests: Vec<Session>, requests: Vec<ProveKeccakRequest>) -> anyhow::Result<Receipt> {
@@ -309,14 +358,18 @@ fn prove(circuit: Session, guests: Vec<Session>, requests: Vec<ProveKeccakReques
         let node = work.session(guest, vec![])?;
         by_claim.insert(claim, node);
     }
-    ensure!(work.requests.len() <= 1, "{} keccak proofs need a union tree, not supported yet", work.requests.len());
-    let keccak = (!work.requests.is_empty()).then(|| work.add(Job::Keccak(0), vec![], 2.0, false, false));
-    // Resolve the assumptions in the order the circuit's claim lists them, as risc0 does.
+    let keccak = work.keccak_root();
+    // Resolve the assumptions in the order the circuit's claim lists them, as risc0 does. The
+    // keccak proofs are one assumption, their union root; it's the one no guest claims.
     let mut resolved = conditional;
+    let mut keccak_used = false;
     for assumption in &assumptions {
         let receipt = match (by_claim.get(&assumption.claim), keccak) {
             (Some(&node), _) => node,
-            (None, Some(node)) if work.requests[0].claim_digest == assumption.claim => node,
+            (None, Some(node)) if !keccak_used => {
+                keccak_used = true;
+                node
+            }
             _ => bail!("no proof for the circuit's assumption {assumption:?}"),
         };
         resolved = work.add(Job::Resolve, vec![resolved, receipt], 1.9, false, false);
@@ -452,6 +505,7 @@ fn describe(work: &Work, index: usize) -> String {
         Job::Preflight(s) => format!("preflight segment {s} (po2 {})", work.segments[*s].po2()),
         Job::Segment(s) => format!("prove segment {s} (po2 {})", work.segments[*s].po2()),
         Job::Keccak(r) => format!("keccak {r} (po2 {})", work.requests[*r].po2),
+        Job::Union => "union".into(),
         Job::Lift => "lift".into(),
         Job::Join => "join".into(),
         Job::Resolve => "resolve".into(),
@@ -480,6 +534,10 @@ fn execute(
             Product::Segment(receipt)
         }
         Job::Keccak(r) => Product::Unknown(prover.prove_keccak(&work.requests[*r]).context("prove keccak")?),
+        Job::Union => {
+            let (Product::Unknown(a), Product::Unknown(b)) = (take(), take()) else { unreachable!() };
+            Product::Unknown(prover.union(&a, &b)?.into_unknown())
+        }
         Job::Lift => {
             let Product::Segment(receipt) = take() else { unreachable!() };
             Product::Claim(prover.lift(&receipt)?)

@@ -20,8 +20,12 @@ bosphorus-methods.workspace = true
 anyhow.workspace = true
 borsh.workspace = true
 hmac = "0.12"
+# The same as LEZ's wallet: recovery phrases (funds.rs).
+bip39 = "2.2.0"
+serde_json = "1.0"
 sha2.workspace = true
+bosphorus-prover = { workspace = true, optional = true }
 
 [features]
 # In-process proving uses the patched host backends, including Metal on Apple silicon.
-prove = ["lee/prove"]
+prove = ["lee/prove", "dep:bosphorus-prover"]

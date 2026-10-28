@@ -66,10 +66,19 @@ cuda() {
     || { echo "CUDA run failed." >&2; return 1; }
 }
 
+# Compiles a trivial shader: `metal --version` can pass while the compiler itself is missing (Xcode 26+
+# ships the Metal Toolchain as a separate download: `xcodebuild -downloadComponent MetalToolchain`).
+metal_works() {
+  command -v xcrun > /dev/null || return 1
+  local d; d=$(mktemp -d)
+  echo 'kernel void k() {}' > "$d/k.metal"
+  xcrun -sdk macosx metal -c "$d/k.metal" -o "$d/k.air" > /dev/null 2>&1; local rc=$?
+  rm -rf "$d"; return $rc
+}
+
 if [[ "${BENCH_CPU:-}" == "1" ]]; then
   echo "BENCH_CPU=1: skipping the GPU paths."
-elif [[ "$(uname)" == Darwin && "$(uname -m)" == arm64 ]] && command -v xcrun > /dev/null \
-     && xcrun -sdk macosx metal --version > /dev/null 2>&1; then
+elif [[ "$(uname)" == Darwin && "$(uname -m)" == arm64 ]] && metal_works; then
   metal && exit 0
   echo "falling back to the CPU path."
 elif command -v nvidia-smi > /dev/null && command -v nvcc > /dev/null; then
@@ -77,6 +86,9 @@ elif command -v nvidia-smi > /dev/null && command -v nvcc > /dev/null; then
   echo "falling back to the CPU path."
 else
   echo "no usable GPU (Apple Silicon + Xcode Metal toolchain, or NVIDIA + CUDA toolkit): CPU only."
+  if [[ "$(uname)" == Darwin && "$(uname -m)" == arm64 ]]; then
+    echo "(Apple Silicon without a working Metal compiler: xcodebuild -downloadComponent MetalToolchain)"
+  fi
 fi
 echo
 
@@ -89,7 +101,9 @@ S4_ONLY_A=1 ./target/release/s2_private
 
 echo
 echo "building cpu_kernel_bench (release, portable: risc0-zkp's reference CpuHal, no GPU)..."
-cargo build --release -p spike-harness --features cpu-bench --bin cpu_kernel_bench
+# risc0-sys compiles Metal kernels on any macOS build; this bench only uses CpuHal, so skip them (the
+# Metal toolchain may be missing). Changing the variable makes cargo rebuild risc0-sys next time.
+RISC0_SKIP_BUILD_KERNELS=1 cargo build --release -p spike-harness --features cpu-bench --bin cpu_kernel_bench
 echo
 echo "=== CPU kernel rates (secondary: NTT + Poseidon2 row hashing) ==="
 ./target/release/cpu_kernel_bench

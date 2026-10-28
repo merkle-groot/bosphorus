@@ -1,0 +1,9 @@
+module com.logos.module.bosphorus_ui.kit
+Waves 1.0 Waves.qml
+Water 1.0 Water.qml
+SellLine 1.0 SellLine.qml
+Pill 1.0 Pill.qml
+BigButton 1.0 BigButton.qml
+RoundButton 1.0 RoundButton.qml
+TagLabel 1.0 TagLabel.qml
+Splash 1.0 Splash.qml

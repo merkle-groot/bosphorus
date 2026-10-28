@@ -6,6 +6,7 @@
 //! Each tx also logs one `[measure]` line to stderr (plan 5.3): submission time, proving time,
 //! inclusion block and its timestamp, and the fee when the payer is known.
 
+pub mod funds;
 pub mod lending;
 pub mod proving;
 
@@ -13,7 +14,7 @@ use std::{borrow::Cow, collections::HashMap, fmt, str::FromStr};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use borsh::BorshSerialize;
-use common::transaction::LeeTransaction;
+use common::{HashType, transaction::LeeTransaction};
 use lee::{
     AccountId, ProgramShardSelector, privacy_preserving_transaction::circuit::ProgramWithDependencies,
     program::Program,
@@ -31,6 +32,27 @@ pub use bosphorus_token::Config as TokenConfig;
 /// Oracle publishes are stamped this far back, so a sequencer clock slightly behind ours still
 /// accepts the window (lending ops do the same with `ClaimConfig::lag_ms`).
 pub const PUBLISH_LAG_MS: u64 = 2_000;
+
+/// The sequencer answered a tx with an error: it refused it, so it can't land.
+#[derive(Debug)]
+pub struct Rejected(pub String);
+
+impl fmt::Display for Rejected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the network refused the transaction: {}", self.0)
+    }
+}
+
+impl std::error::Error for Rejected {}
+
+/// A wallet send error as `anyhow`, keeping a refusal recognisable ([`Rejected`]): any other
+/// failure after the tx was handed over (a timeout, a dropped connection) may still let it land.
+pub fn send_error(e: wallet::ExecutionFailureKind) -> anyhow::Error {
+    match e {
+        wallet::ExecutionFailureKind::SequencerClientError(sequencer_service_rpc::ClientError::Call(obj)) => anyhow::Error::new(Rejected(obj.message().to_owned())),
+        e => anyhow!("{e:?}"),
+    }
+}
 
 pub fn now_ms() -> Result<u64> {
     Ok(u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis())?)
@@ -94,7 +116,15 @@ pub struct Client {
 impl Client {
     /// Uses `LEE_WALLET_HOME_DIR`, like the `wallet` binary.
     pub fn from_env() -> Result<Self> {
+        proving::install();
         Ok(Self { wallet: WalletCore::from_env()? })
+    }
+
+    /// The wallet in `home` (`wallet_config.json`, `storage.json`), without touching the
+    /// environment: for library hosts, where setting `LEE_WALLET_HOME_DIR` would race other threads.
+    pub fn open(home: &std::path::Path) -> Result<Self> {
+        proving::install();
+        Ok(Self { wallet: WalletCore::new_update_chain(home.join("wallet_config.json"), home.join("storage.json"), None)? })
     }
 
     /// `label` names the op in the `[measure]` line.
@@ -105,7 +135,7 @@ impl Client {
         accounts: Vec<AccountMention>,
         instruction: impl BorshSerialize,
         payer: Option<AccountId>,
-    ) -> Result<()> {
+    ) -> Result<HashType> {
         let data = Program::serialize_instruction(instruction)?;
         let signer = accounts.iter().find_map(|m| match m.identity {
             AccountIdentity::Public(id) => Some(id),
@@ -123,7 +153,7 @@ impl Client {
             .wallet
             .send_pub_tx_paid_by(accounts, data, program, payer)
             .await
-            .map_err(|e| anyhow!("{e:?}"))?;
+            .map_err(send_error)?;
         let (_, block) = self.wallet.poll_transaction(hash).await?;
         eprintln!("tx {hash} included in block {block}");
         let fee = match (payer, balance_before) {
@@ -131,7 +161,7 @@ impl Client {
             _ => None,
         };
         self.measure(label, "public", hash, submitted, None, block, fee).await;
-        Ok(())
+        Ok(hash)
     }
 
     pub async fn native_balance(&self, account: AccountId) -> Result<u128> {
@@ -306,18 +336,18 @@ impl Client {
         Ok(())
     }
 
-    pub async fn token_transfer(&self, token: AccountId, from: AccountId, to: AccountId, amount: u128, payer: Option<AccountId>) -> Result<()> {
+    pub async fn token_transfer(&self, token: AccountId, from: AccountId, to: AccountId, amount: u128, payer: Option<AccountId>) -> Result<HashType> {
         let before = self.token_balance(token, Holder::Public(to)).await?;
         let accounts = vec![Holder::Public(from).signer(token), no_sign(to, token)];
-        self.send_public("token.transfer", token, accounts, bosphorus_token::Instruction::Transfer { amount }, payer).await?;
+        let hash = self.send_public("token.transfer", token, accounts, bosphorus_token::Instruction::Transfer { amount }, payer).await?;
         let after = self.token_balance(token, Holder::Public(to)).await?;
         ensure!(after == before + amount, "transfer didn't apply: recipient {before} → {after}");
-        Ok(())
+        Ok(hash)
     }
 
     /// Public → private transfer of a custom token, as a privacy-preserving tx (fee-exempt today).
     /// `to` must be a private account in this wallet.
-    pub async fn token_shield(&mut self, token: AccountId, from: AccountId, to: AccountId, amount: u128) -> Result<()> {
+    pub async fn token_shield(&mut self, token: AccountId, from: AccountId, to: AccountId, amount: u128) -> Result<HashType> {
         let program = self.program(token, TOKEN_ELF).await?;
         let accounts = vec![Holder::Public(from).signer(token), Holder::Private(to).signer(token)];
         let data = Program::serialize_instruction(bosphorus_token::Instruction::Transfer { amount })?;
@@ -326,7 +356,7 @@ impl Client {
             .wallet
             .send_privacy_preserving_tx(accounts, data, &program)
             .await
-            .map_err(|e| anyhow!("{e:?}"))?;
+            .map_err(send_error)?;
         let submitted = now_ms()?;
         let (tx, block) = self.wallet.poll_transaction(hash).await?;
         eprintln!("tx {hash} included in block {block}");
@@ -335,7 +365,7 @@ impl Client {
         let secret = secrets.into_iter().next().context("no shared secret for the recipient")?;
         self.wallet.decode_insert_privacy_preserving_transaction_results(&tx, &[AccDecodeData::Decode(secret, to)])?;
         self.wallet.store_persistent_data()?;
-        Ok(())
+        Ok(hash)
     }
 
     /// Public balances come from the sequencer; private ones from the wallet's decoded notes.

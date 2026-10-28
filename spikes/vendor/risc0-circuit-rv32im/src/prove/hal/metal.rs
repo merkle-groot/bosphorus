@@ -190,7 +190,7 @@ impl CircuitAccumulator<Hal> for MetalCircuitHal {
             mix: raw_buffer(mix),
         };
         let preflight = raw_preflight(preflight);
-        if !std::env::var("R0_METAL_FULL").is_ok_and(|v| v == "1") || std::env::var("R0_METAL_ACCUM").is_ok_and(|v| v == "0") {
+        if !risc0_metal::full() || std::env::var("R0_METAL_ACCUM").is_ok_and(|v| v == "0") {
             return timed(&PROFILE_ACCUM_NS, || {
                 ffi_wrap(|| unsafe {
                     risc0_circuit_rv32im_cpu_accum(&buffers, &preflight, cycles as u32)
@@ -265,7 +265,7 @@ impl CircuitHal<Hal> for MetalCircuitHal {
         po2: usize,
         steps: usize,
     ) {
-        if std::env::var("R0_METAL_FULL").is_ok_and(|v| v == "1") {
+        if risc0_metal::full() {
             risc0_metal::evaluate(risc0_metal::Circuit::Rv32im, check, groups, globals, poly_mix, po2, steps);
             return;
         }

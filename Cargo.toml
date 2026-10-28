@@ -4,6 +4,7 @@ members = [
     "core",
     "client",
     "app",
+    "ffi",
     "cli",
     "keeper",
     "programs/token/core",
@@ -71,3 +72,8 @@ debug = "line-tables-only"
 # risc0 executor is painfully slow unoptimised; the host side of spikes runs it a lot.
 [profile.dev.package."*"]
 opt-level = 3
+
+# LEZ's wallet with one host-side hook, `set_private_prover`, so private txs prove with
+# `bosphorus-prover`. See spikes/vendor/lez-wallet/Cargo.toml.
+[patch."https://github.com/logos-blockchain/logos-execution-zone"]
+wallet = { path = "spikes/vendor/lez-wallet" }

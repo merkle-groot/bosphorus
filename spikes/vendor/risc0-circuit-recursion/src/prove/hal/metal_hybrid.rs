@@ -116,7 +116,7 @@ impl CircuitHal<MetalHal> for MetalCircuitHal {
         po2: usize,
         steps: usize,
     ) {
-        if std::env::var("R0_METAL_FULL").is_ok_and(|v| v == "1") {
+        if risc0_metal::full() {
             risc0_metal::evaluate(risc0_metal::Circuit::Recursion, check, groups, globals, poly_mix, po2, steps);
             return;
         }

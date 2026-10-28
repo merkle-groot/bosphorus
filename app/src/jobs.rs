@@ -122,6 +122,10 @@ pub struct Job {
     /// which sits with the wallet (whose storage holds every key in the clear anyway).
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// Set by builds that save the tx's hash before handing it over: then a job stopped while
+    /// proving or sending, with no hash saved, sent nothing.
+    #[serde(default)]
+    pub send_marked: bool,
     pub error: Option<ApiError>,
     pub note: Option<String>,
 }

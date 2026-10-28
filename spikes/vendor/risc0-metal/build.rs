@@ -12,7 +12,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=R0_METAL_STORE");
     println!("cargo:rerun-if-env-changed=R0_METAL_EXP");
     let budget = env::var("R0_METAL_BUDGET").unwrap_or_else(|_| "400".into());
-    let store = env::var("R0_METAL_STORE").unwrap_or_else(|_| "8".into());
+    let store = env::var("R0_METAL_STORE").unwrap_or_else(|_| "16".into());
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     for (circuit, subdir) in [("rv32im", "zirgen/"), ("recursion", ""), ("keccak", "zirgen/")] {
         for file in ["poly_ext.rs", "taps.rs"] {
