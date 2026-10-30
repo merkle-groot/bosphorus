@@ -24,7 +24,7 @@ function fail(code, message) { return { __error: { code: code, message: message 
 
 function answer(method, p, opts) {
     if (opts.offline && method === "markets") return [market, market2].map(function(m) { var c = JSON.parse(JSON.stringify(m)); c.cached = true; return c })
-    if (opts.offline && ["market", "positions", "balances", "quote", "sync", "transfer", "submit"].indexOf(method) >= 0)
+    if (opts.offline && ["market", "positions", "balances", "quote", "sync", "transfer", "submit", "pool", "pool_deposit", "pool_withdraw", "pool_ragequit"].indexOf(method) >= 0)
         return fail("network", "client error (SendRequest): connection error: Connection refused (os error 61)")
     if (opts.offline && method === "info")
         return { lending: "Public/DpQfghec2FLsR813PCJbbc6wuLajnNNGwDsXM4poARKS", sequencer: "http://127.0.0.1:3040", last_block: null, synced_block: 1014,
@@ -77,6 +77,14 @@ function answer(method, p, opts) {
           error: { code: "rejected", message: "the network refused the transaction: Invalid nonce" } }
     ]
     case "transfer": return { tx: "840bf35862b2232694597e9e191eb12449431b8a7e33f7f6b9d0c7e945bc6382" }
+    case "pool": return { pool: "Public/HyWkqC3kJ4N6ewpYoHgvBmKpfp9oWRrZBj25dg4G6HCb", asp: PUB, approved: 3, lots: [
+        { account: PRIV, label: "57299104799b5f92818acc37a031d25fcf44030114ced615e7402327a4061bfe", token: null, amount: "20000000", state: "approved", depositor: PUB, can_take_back: true },
+        { account: PRIV, label: "ddfede486de510769d33ffc092f60f7346ac2abbcb606bfc2778528ec415ff34", token: TKB, amount: "2000000000", state: "approved", depositor: PUB, can_take_back: true },
+        { account: PRIV, label: "a1fede486de510769d33ffc092f60f7346ac2abbcb606bfc2778528ec415ff34", token: TKB, amount: "1000000000", state: "approved", depositor: PUB, can_take_back: true },
+        { account: PRIV, label: "c508209ed9b4c17473a681721a2cc4a4a17cce4b38a02faac83ba8d70c8f5f2a", token: TKB, amount: "500000000", state: "pending", depositor: PUB, can_take_back: true }] }
+    case "pool_deposit": return { tx: "840bf35862b2232694597e9e191eb12449431b8a7e33f7f6b9d0c7e945bc6382", label: "57299104799b5f92818acc37a031d25fcf44030114ced615e7402327a4061bfe" }
+    case "pool_withdraw":
+    case "pool_ragequit": return { tx: "840bf35862b2232694597e9e191eb12449431b8a7e33f7f6b9d0c7e945bc6382" }
     case "sync": return { synced_block: 1014 }
     case "new_account": return { account: "Public/NEW1111111111111111111111111111111111111" }
     case "open": return { prover: { gpu: true, keccak_po2: 14 } }

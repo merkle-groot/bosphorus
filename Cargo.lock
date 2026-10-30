@@ -1174,6 +1174,7 @@ dependencies = [
  "bosphorus-client",
  "bosphorus-core",
  "bosphorus-lending",
+ "bosphorus-pool",
  "bosphorus-token",
  "clap",
  "common",
@@ -1187,12 +1188,15 @@ name = "bosphorus-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "bip39",
  "borsh",
  "bosphorus-core",
+ "bosphorus-disclosure",
  "bosphorus-lending",
  "bosphorus-methods",
  "bosphorus-oracle",
+ "bosphorus-pool",
  "bosphorus-prover",
  "bosphorus-token",
  "common",
@@ -1200,9 +1204,12 @@ dependencies = [
  "lee",
  "lee_core",
  "program_loader_core",
+ "rand 0.8.6",
+ "risc0-zkvm",
  "sequencer_service_rpc",
  "serde_json",
  "sha2 0.10.9",
+ "tokio",
  "wallet",
 ]
 
@@ -1213,6 +1220,27 @@ dependencies = [
  "borsh",
  "proptest",
  "ruint",
+]
+
+[[package]]
+name = "bosphorus-disclosure"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "bosphorus-core",
+ "hmac 0.12.1",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "bosphorus-disclosure-guest"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "bosphorus-disclosure",
+ "bosphorus-lending",
+ "lee_core",
+ "risc0-zkvm",
 ]
 
 [[package]]
@@ -1265,16 +1293,20 @@ name = "bosphorus-methods"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "borsh",
  "bosphorus-core",
+ "bosphorus-disclosure",
  "bosphorus-lending",
  "bosphorus-oracle",
+ "bosphorus-pool",
  "bosphorus-prover",
  "bosphorus-token",
  "lee",
  "lee_core",
  "program_loader_core",
  "risc0-build",
+ "risc0-zkvm",
 ]
 
 [[package]]
@@ -1294,6 +1326,35 @@ dependencies = [
  "borsh",
  "bosphorus-oracle",
  "lee_core",
+]
+
+[[package]]
+name = "bosphorus-pool"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "bosphorus-provenance",
+ "lee_core",
+ "risc0-zkvm",
+]
+
+[[package]]
+name = "bosphorus-pool-guest"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "bosphorus-pool",
+ "bosphorus-provenance",
+ "lee_core",
+]
+
+[[package]]
+name = "bosphorus-provenance"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "proptest",
+ "sha2 0.10.9",
 ]
 
 [[package]]

@@ -10,8 +10,9 @@
 //! `insufficient_liquidity`, …), `payer_cannot_fund`, `not_included`, `bad_request`,
 //! `unknown_method`, `not_found`, `timeout`, `network` (the sequencer can't be reached or didn't
 //! answer), `rejected` (the sequencer refused a tx: nothing was sent), `insufficient_balance`,
-//! `unconfirmed` (a transfer went out but hasn't shown up: don't repeat it before a sync), or
-//! `failed`.
+//! `unconfirmed` (a transfer went out but hasn't shown up: don't repeat it before a sync),
+//! `no_pool` (no screened pool configured), `not_approved` (the lots exist but the ASP hasn't
+//! approved enough of them yet), or `failed`.
 
 pub mod jobs;
 
@@ -29,14 +30,16 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, ensure};
 use bosphorus_client::{
-    Client, Feed, Holder, LENDING_ELF, ORACLE_ELF, Rejected, TOKEN_ELF, hex_id, image_id,
+    Client, Feed, Holder, LENDING_ELF, ORACLE_ELF, POOL_ELF, Rejected, TOKEN_ELF, hex_id, image_id,
+    funds::TransferSent,
     lending::{
         ClaimConfig, Expect, HashType, LeeTransaction, Market, MarketAccounts, MarketId, On, Owner, Position, Prepared, Refusal, Scanner, Sent,
         SharedSecretKey, market_id_hex, market_status, now_ms, parse_market_id, position_status,
     },
+    pool::{Label, LotState, hex32, parse_label},
 };
 use bosphorus_core::{U256, WAD, format_wad, shares};
-use lee::AccountId;
+use lee::{AccountId, native_token::NATIVE_TOKEN_PROGRAM_ID};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::sync::{RwLock, broadcast, mpsc};
@@ -252,6 +255,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Where the market scan starts (the lending program's deploy block saves scanning the chain).
     pub scan_from: u64,
+    /// The screened pool (E10), if any: `pool_*` methods answer `no_pool` without one.
+    pub pool: Option<AccountId>,
 }
 
 /// Markets found so far, saved so a restart doesn't rescan the chain.
@@ -412,6 +417,17 @@ impl App {
         }
         let market = |s: &str| parse_market_id(s).map_err(|e| coded("bad_request", format!("market: {e:#}")));
         let holder = |s: &str| s.parse::<Holder>().map_err(|e| coded("bad_request", format!("{e:#}")));
+        let amount = |s: &str| -> Result<u128> {
+            let amount = s.parse::<u128>().map_err(|e| coded("bad_request", format!("amount: {e}")))?;
+            ensure!(amount > 0, coded("bad_request", "amount: nothing to move"));
+            Ok(amount)
+        };
+        // A token program (`Public/<id>`); native LEZ if absent.
+        let token = |s: Option<&str>| match s.map(holder).transpose()? {
+            None => Ok(NATIVE_TOKEN_PROGRAM_ID),
+            Some(Holder::Public(token)) => Ok(token),
+            Some(Holder::Private(_)) => Err(coded("bad_request", "token: a token is a Public/<id> program")),
+        };
         match method {
             "info" => self.info().await,
             "accounts" => self.accounts().await,
@@ -447,14 +463,49 @@ impl App {
                     token: Option<String>,
                 }
                 let p: P = params(p)?;
-                let amount = p.amount.parse::<u128>().map_err(|e| coded("bad_request", format!("amount: {e}")))?;
-                ensure!(amount > 0, coded("bad_request", "amount: nothing to move"));
-                let token = match p.token.as_deref().map(holder).transpose()? {
-                    None => None,
-                    Some(Holder::Public(token)) => Some(token),
-                    Some(Holder::Private(_)) => return Err(coded("bad_request", "token: a token is a Public/<id> program")),
-                };
-                self.transfer(token, holder(&p.from)?, holder(&p.to)?, amount).await
+                let (amount, token) = (amount(&p.amount)?, token(p.token.as_deref())?);
+                let token = (token != NATIVE_TOKEN_PROGRAM_ID).then_some(token);
+                self.move_funds(Move::Transfer { token, from: holder(&p.from)?, to: holder(&p.to)?, amount }).await
+            }
+            "pool" => self.pool().await,
+            "pool_deposit" => {
+                #[derive(Deserialize)]
+                struct P {
+                    from: String,
+                    to: String,
+                    amount: String,
+                    #[serde(default)]
+                    token: Option<String>,
+                }
+                let p: P = params(p)?;
+                let (pool, asset, amount) = (self.pool_id()?, token(p.token.as_deref())?, amount(&p.amount)?);
+                self.move_funds(Move::PoolDeposit { pool, asset, from: holder(&p.from)?, to: holder(&p.to)?, amount }).await
+            }
+            "pool_withdraw" => {
+                #[derive(Deserialize)]
+                struct P {
+                    from: String,
+                    to: String,
+                    amount: String,
+                    #[serde(default)]
+                    token: Option<String>,
+                }
+                let p: P = params(p)?;
+                let (pool, asset, amount) = (self.pool_id()?, token(p.token.as_deref())?, amount(&p.amount)?);
+                let Holder::Private(from) = holder(&p.from)? else { return Err(coded("bad_request", "from: lots sit on a private account")) };
+                self.move_funds(Move::PoolWithdraw { pool, asset, holder: from, to: holder(&p.to)?, amount }).await
+            }
+            "pool_ragequit" => {
+                #[derive(Deserialize)]
+                struct P {
+                    holder: String,
+                    label: String,
+                }
+                let p: P = params(p)?;
+                let pool = self.pool_id()?;
+                let Holder::Private(id) = holder(&p.holder)? else { return Err(coded("bad_request", "holder: lots sit on a private account")) };
+                let label = parse_label(&p.label).map_err(|e| coded("bad_request", format!("label: {e:#}")))?;
+                self.move_funds(Move::PoolRagequit { pool, holder: id, label }).await
             }
             "sync" => self.sync().await,
             "quote" => self.quote(params(p)?).await,
@@ -493,8 +544,14 @@ impl App {
             "syncing": self.inner.syncing.lock().expect("sync lock").map(|(synced, target)| json!({ "synced_block": synced, "target_block": target })),
             "privacy_circuit_problem": if reachable { problem(client.check_circuit().await) } else { None },
             "lending_problem": if reachable { problem(client.check_program(lending, LENDING_ELF).await) } else { None },
+            "pool": self.inner.config.pool.map(public),
+            "pool_problem": match self.inner.config.pool {
+                Some(pool) if reachable => problem(client.check_program(pool, POOL_ELF).await),
+                _ => None,
+            },
             "build": {
                 "lending": hex_id(&image_id(LENDING_ELF)?),
+                "pool": hex_id(&image_id(POOL_ELF)?),
                 "oracle": hex_id(&image_id(ORACLE_ELF)?),
                 "token": hex_id(&image_id(TOKEN_ELF)?),
             },
@@ -661,40 +718,34 @@ impl App {
 
     // ---- wallet ---------------------------------------------------------------------------
 
-    /// Moves native LEZ or a token and waits for it to land (`{"tx"}`). The tx hash is known before
-    /// it goes out, so a lost reply doesn't lose track of it: the error is then `unconfirmed`
-    /// (with the hash), never one that invites sending again while it may still land.
-    async fn transfer(&self, token: Option<AccountId>, from: Holder, to: Holder, amount: u128) -> Result<Value> {
+    /// Moves funds and waits for them to land (`{"tx", "block", "decoded"}`, and `"label"` for a
+    /// deposit): a transfer, or a pool deposit, withdrawal or ragequit. The tx hash is known before
+    /// it goes out, so a lost reply doesn't lose track of it: the error is then `unconfirmed` (with
+    /// the hash), never one that invites sending again while it may still land.
+    async fn move_funds(&self, m: Move) -> Result<Value> {
         let _heavy = self.inner.heavy.lock().await;
         let marked = Arc::new(Mutex::new(None::<HashType>));
         let sent = {
             let client = self.inner.client.read().await;
-            let have = match token {
-                None => client.native(from).await?,
-                Some(token) => client.token_balance(token, from).await?,
-            };
-            if have < amount {
-                let asof = if matches!(from, Holder::Private(_)) { " (as of the last sync)" } else { "" };
-                return Err(coded("insufficient_balance", format!("{from} holds {have}{asof}, less than {amount}")));
-            }
+            m.check(&client).await?;
             let hook = {
                 let marked = marked.clone();
                 Box::new(move |hash: HashType, _: &[SharedSecretKey]| *marked.lock().expect("hash lock") = Some(hash)) as SendHook
             };
-            wallet::BEFORE_SEND.scope(hook, client.send_transfer(token, from, to, amount)).await
+            wallet::BEFORE_SEND.scope(hook, m.send(&client)).await
         };
         let hash = *marked.lock().expect("hash lock");
-        let (sent, hash) = match (sent, hash) {
-            (Ok(sent), _) => {
+        let (sent, label, hash) = match (sent, hash) {
+            (Ok((sent, label)), _) => {
                 let hash = sent.hash;
-                (Some(sent), hash)
+                (Some(sent), label, hash)
             }
             // Failed before it went out, or refused: nothing can land.
             (Err(e), None) => return Err(e),
             (Err(e), Some(_)) if e.is::<Rejected>() => return Err(e),
             (Err(e), Some(hash)) => {
-                eprintln!("[app] transfer {hash}: sent, but {e:#}; watching for it");
-                (None, hash)
+                eprintln!("[app] {} {hash}: sent, but {e:#}; watching for it", m.name());
+                (None, None, hash)
             }
         };
         let since = self.inner.client.read().await.last_block().await.ok();
@@ -707,12 +758,61 @@ impl App {
                     }
                     None => false,
                 };
-                // Without its secrets (the reply was lost) a private transfer's notes show up at the next sync.
-                Ok(json!({ "tx": hash.to_string(), "block": block, "decoded": synced || matches!(*tx, LeeTransaction::Public(_)) }))
+                // Without its secrets (the reply was lost) a private tx's notes show up at the next sync.
+                let mut v = json!({ "tx": hash.to_string(), "block": block, "decoded": synced || matches!(*tx, LeeTransaction::Public(_)) });
+                if let Some(label) = label {
+                    v["label"] = json!(hex32(&label));
+                }
+                Ok(v)
             }
             Landing::Dropped => Err(coded("not_included", format!("tx {hash} wasn't included in the {TRANSFER_BLOCKS} blocks after it went out: the network most likely dropped it, so nothing moved; sync to be sure before trying again"))),
             Landing::Stalled => Err(coded("unconfirmed", format!("tx {hash} went out, but the network has made almost no blocks since: it may still land; sync later before trying again"))),
         }
+    }
+
+    // ---- the screened pool (E10) ----------------------------------------------------------
+
+    fn pool_id(&self) -> Result<AccountId> {
+        self.inner.config.pool.ok_or_else(|| coded("no_pool", "no screened pool is configured"))
+    }
+
+    /// The pool and this wallet's lots: `{"pool", "asp", "approved", "lots": [{"account", "label",
+    /// "token", "amount", "state", "depositor", "can_take_back"}]}`. `token` is null for native
+    /// LEZ; `state` is `approved` (withdrawable) or `pending` (only a ragequit takes it out);
+    /// `can_take_back`: the depositor is this wallet's. Lots are as of the last sync.
+    async fn pool(&self) -> Result<Value> {
+        let pool = self.pool_id()?;
+        let client = self.inner.client.read().await;
+        let config = client.pool_config(pool).await?;
+        let approved = client.pool_approved(pool).await?;
+        let privates: Vec<AccountId> = client
+            .wallet
+            .storage()
+            .key_chain()
+            .account_ids()
+            .filter_map(|(id, _)| match id {
+                wallet::account::AccountIdWithPrivacy::Private(a) => Some(a),
+                wallet::account::AccountIdWithPrivacy::Public(_) => None,
+            })
+            .collect();
+        let mut lots = vec![];
+        for holder in privates {
+            for (lot, state) in client.pool_lot_states(pool, holder).await? {
+                let depositor = client.pool_record(pool, &lot.label).await?.map(|r| r.depositor);
+                let ours = depositor.is_some_and(|d| client.wallet.get_account_public_signing_key(d).is_some() || client.wallet.resolve_private_account(d).is_some());
+                let asset = AccountId::new(lot.asset);
+                lots.push(json!({
+                    "account": Holder::Private(holder).to_string(),
+                    "label": hex32(&lot.label),
+                    "token": (asset != NATIVE_TOKEN_PROGRAM_ID).then(|| public(asset)),
+                    "amount": lot.amount.to_string(),
+                    "state": state.name(),
+                    "depositor": depositor.map(public),
+                    "can_take_back": ours,
+                }));
+            }
+        }
+        Ok(json!({ "pool": public(pool), "asp": public(config.asp), "approved": approved.labels().count(), "lots": lots }))
     }
 
     /// Catches the wallet's private state up with the chain, a step at a time (reads go on
@@ -766,6 +866,75 @@ impl App {
             if tokio::time::timeout_at(deadline, events.recv()).await.is_err() {
                 return Err(coded("timeout", format!("job {id} is still {:?}", job.state)));
             }
+        }
+    }
+}
+
+/// What [`App::move_funds`] sends. None touches a position, so each is sent and watched like a
+/// transfer, not as a job.
+enum Move {
+    Transfer { token: Option<AccountId>, from: Holder, to: Holder, amount: u128 },
+    PoolDeposit { pool: AccountId, asset: AccountId, from: Holder, to: Holder, amount: u128 },
+    PoolWithdraw { pool: AccountId, asset: AccountId, holder: AccountId, to: Holder, amount: u128 },
+    PoolRagequit { pool: AccountId, holder: AccountId, label: Label },
+}
+
+impl Move {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Transfer { .. } => "transfer",
+            Self::PoolDeposit { .. } => "pool deposit",
+            Self::PoolWithdraw { .. } => "pool withdrawal",
+            Self::PoolRagequit { .. } => "ragequit",
+        }
+    }
+
+    /// Refusals with a code, before anything is proven.
+    async fn check(&self, client: &Client) -> Result<()> {
+        let asof = |h: Holder| if matches!(h, Holder::Private(_)) { " (as of the last sync)" } else { "" };
+        match *self {
+            Self::Transfer { token, from, amount, .. } => {
+                let have = match token {
+                    None => client.native(from).await?,
+                    Some(token) => client.token_balance(token, from).await?,
+                };
+                ensure!(have >= amount, coded("insufficient_balance", format!("{from} holds {have}{}, less than {amount}", asof(from))));
+            }
+            Self::PoolDeposit { asset, from, amount, .. } => {
+                ensure!(matches!(from, Holder::Public(_)), coded("bad_request", "from: a screened deposit comes from a public account (a private source can't be screened)"));
+                let have = if asset == NATIVE_TOKEN_PROGRAM_ID { client.native(from).await? } else { client.token_balance(asset, from).await? };
+                ensure!(have >= amount, coded("insufficient_balance", format!("{from} holds {have}, less than {amount}")));
+            }
+            Self::PoolWithdraw { pool, asset, holder, amount, .. } => {
+                let (mut approved, mut pending) = (0u128, 0u128);
+                for (lot, state) in client.pool_lot_states(pool, holder).await? {
+                    if lot.asset != *asset.value() {
+                        continue;
+                    }
+                    match state {
+                        LotState::Approved => approved = approved.saturating_add(lot.amount),
+                        LotState::Pending => pending = pending.saturating_add(lot.amount),
+                    }
+                }
+                if approved < amount {
+                    let code = if approved.saturating_add(pending) >= amount { "not_approved" } else { "insufficient_balance" };
+                    return Err(coded(code, format!("Private/{holder} holds {approved} approved and {pending} pending (as of the last sync), less than {amount} approved")));
+                }
+            }
+            Self::PoolRagequit { .. } => {}
+        }
+        Ok(())
+    }
+
+    async fn send(&self, client: &Client) -> Result<(TransferSent, Option<Label>)> {
+        match *self {
+            Self::Transfer { token, from, to, amount } => Ok((client.send_transfer(token, from, to, amount).await?, None)),
+            Self::PoolDeposit { pool, asset, from, to, amount } => {
+                let (sent, label) = client.send_pool_deposit(pool, asset, from, to, amount).await?;
+                Ok((sent, Some(label)))
+            }
+            Self::PoolWithdraw { pool, asset, holder, to, amount } => Ok((client.send_pool_withdraw(pool, asset, holder, amount, to).await?, None)),
+            Self::PoolRagequit { pool, holder, label } => Ok((client.send_pool_ragequit(pool, holder, label).await?, None)),
         }
     }
 }

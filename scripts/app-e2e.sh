@@ -8,7 +8,9 @@
 #      its saved hash and secrets, and the wallet gets the withdrawn tokens;
 #   5. the app is killed while a job is proving (stretched with BOS_APP_DELAY_SEND_MS): its hash is
 #      saved only right before sending, so on restart the job is `interrupted` at once, nothing is
-#      sent, and the position hasn't moved.
+#      sent, and the position hasn't moved;
+#   6. with the E10 pool deployed (scripts/e10-pool.sh): screened deposits, the refusals with their
+#      codes (`not_approved`, a private source), a withdrawal once the ASP approved, a take-back.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/net.sh
@@ -17,6 +19,8 @@ source "$DEPLOY_ENV"
 # shellcheck source=/dev/null
 source "$STATE/e9.env"
 [[ -n "${E9_LENDING:-}" && -n "${E9_MARKET:-}" ]] || { echo "deploy first: scripts/e9-held.sh" >&2; exit 1; }
+# shellcheck source=/dev/null
+[[ -f "$STATE/e10.env" ]] && source "$STATE/e10.env"
 APP_BIN=${APP_BIN:-$PWD/target/release/bos-app}
 DATA=$(mktemp -d)
 RUN=$DATA/run
@@ -33,7 +37,7 @@ start_app() {
   mkfifo "$RUN/in"
   [[ -f "$RUN/out" ]] && cat "$RUN/out" >> "$RUN/all"
   : > "$RUN/out"
-  env "$@" "$APP_BIN" --lending "$E9_LENDING" --data-dir "$DATA" < "$RUN/in" > "$RUN/out" 2>> "$LOGS/app-e2e.err" &
+  env "$@" "$APP_BIN" --lending "$E9_LENDING" ${POOL:+--pool "$POOL"} --data-dir "$DATA" < "$RUN/in" > "$RUN/out" 2>> "$LOGS/app-e2e.err" &
   APP_PID=$!
   exec 3> "$RUN/in"
 }
@@ -90,6 +94,11 @@ STAGE=$(new_account public Public)
 bos token mint --token "$TKB" --authority "$PAYER" --to "$PUBLIC_LENDER" --amount 1000000000 --payer "$PAYER" > /dev/null
 bos token mint --token "$TKB" --authority "$PAYER" --to "$STAGE" --amount 100000000000 --payer "$PAYER" > /dev/null
 expect "$(bos token shield --token "$TKB" --from "$STAGE" --to "$LENDER" --amount 100000000000)" 100000000000 "shielded TKB"
+if [[ -n "${POOL:-}" ]]; then
+  POOL_DEPOSITOR=$(new_account public Public)
+  POOL_RECIPIENT=$(new_account public Public)
+  bos token mint --token "$TKB" --authority "$PAYER" --to "$POOL_DEPOSITOR" --amount 4000000000 --payer "$PAYER" > /dev/null
+fi
 
 step "app: reads"
 start_app
@@ -147,6 +156,29 @@ J=$(result job "{\"id\":\"$JOB\"}")
 expect "$(jq -r '.state, .tx' <<< "$J" | paste -sd' ' -)" "interrupted null" "in-flight job after the restart"
 expect "$(position)" $((SHARES - HALF)) "supply shares untouched"
 stop_app
+
+if [[ -n "${POOL:-}" ]]; then
+  step "the screened pool (E10): deposits, refusals, the ASP's approval, a withdrawal, a take-back"
+  start_app
+  expect "$(result info | jq -r .pool_problem)" null "the pool runs this build"
+  deposit() { result pool_deposit "{\"from\":\"$POOL_DEPOSITOR\",\"to\":\"$LENDER\",\"amount\":\"$1\",\"token\":\"$TKB\"}" | jq -r .label; }
+  LABEL=$(deposit 3000000000)
+  OTHER=$(deposit 1000000000)
+  lot_state() { result pool | jq -r --arg l "$1" '.lots[] | select(.label == $l) | .state'; }
+  expect "$(lot_state "$LABEL")" pending "a lot before approval"
+  R=$(call pool_withdraw "{\"from\":\"$LENDER\",\"to\":\"$POOL_RECIPIENT\",\"amount\":\"1\",\"token\":\"$TKB\"}")
+  expect "$(jq -r .error.code <<< "$R")" not_approved "a withdrawal before approval"
+  R=$(call pool_deposit "{\"from\":\"$LENDER\",\"to\":\"$LENDER\",\"amount\":\"1\",\"token\":\"$TKB\"}")
+  expect "$(jq -r .error.code <<< "$R")" bad_request "a deposit from a private account"
+  bos pool approve --pool "$POOL" --asp "$PAYER" --payer "$PAYER" "$LABEL" > /dev/null
+  expect "$(lot_state "$LABEL")" approved "the lot after approval"
+  result pool_withdraw "{\"from\":\"$LENDER\",\"to\":\"$POOL_RECIPIENT\",\"amount\":\"2000000000\",\"token\":\"$TKB\"}" > /dev/null
+  expect "$(bos token balance --token "$TKB" --account "$POOL_RECIPIENT")" 2000000000 "recipient TKB after the withdrawal"
+  result pool_ragequit "{\"holder\":\"$LENDER\",\"label\":\"$OTHER\"}" > /dev/null
+  expect "$(bos token balance --token "$TKB" --account "$POOL_DEPOSITOR")" 1000000000 "depositor TKB after the take-back"
+  expect "$(result pool | jq -r --arg a "$LENDER" '[.lots[] | select(.account == $a) | .amount] | join(" ")')" 1000000000 "lots left: the approved remainder"
+  stop_app
+fi
 
 step "stdout carried only protocol lines"
 cat "$RUN/out" >> "$RUN/all"

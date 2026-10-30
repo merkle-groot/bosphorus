@@ -80,7 +80,7 @@ static json readSettings(const std::string& path)
     json s = json::parse(file, nullptr, false);
     if (!s.is_object())
         return out;
-    for (const char* key : {"sequencer", "lending"}) {
+    for (const char* key : {"sequencer", "lending", "pool"}) {
         if (s.contains(key) && s[key].is_string())
             out[key] = s[key];
     }
@@ -203,8 +203,10 @@ std::string BosphorusModule::run(const std::string& method, const std::string& p
         std::lock_guard<std::mutex> lock(m_openMutex);
         if (m_app.load())
             return json{{"id", nullptr}, {"result", json::parse(m_openResult, nullptr, false)}}.dump();
-        if (!params.contains("lending") && defaults.contains("lending"))
-            params["lending"] = defaults["lending"];
+        for (const char* key : {"lending", "pool"}) {
+            if (!params.contains(key) && defaults.contains(key))
+                params[key] = defaults[key];
+        }
         params["wallet_home"] = wallet;
         params["data_dir"] = dataDir();
         BosAppOpenOutput opened = bos_app_open(params.dump().c_str());

@@ -1,0 +1,18 @@
+[package]
+name = "bosphorus-disclosure-guest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Solvency proof guest (E11). Not a LEZ program: it's proved off chain and checked by an auditor
+# against its image id. Never deployed.
+[[bin]]
+name = "disclosure"
+path = "src/bin/disclosure.rs"
+
+[dependencies]
+borsh.workspace = true
+risc0-zkvm.workspace = true
+lee_core.workspace = true
+bosphorus-lending.workspace = true
+bosphorus-disclosure.workspace = true

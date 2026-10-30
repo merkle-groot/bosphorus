@@ -14,11 +14,17 @@ pub struct TxReport {
     /// Tx hash (hex), as printed by `bos` ("tx … included in block …").
     #[arg(long)]
     tx: String,
-    /// Scan for this owner's id, keys and position salt.
-    #[arg(long, requires = "market")]
+    /// Scan for this owner's id and keys, and with `--market` its position salt.
+    #[arg(long)]
     owner: Option<Holder>,
     #[arg(long, value_parser = bosphorus_client::lending::parse_market_id)]
     market: Option<MarketId>,
+    /// A pool (E10): decode its effects; with `--label`, scan for the labels and their records.
+    #[arg(long)]
+    pool: Option<Holder>,
+    /// Repeatable; needs `--pool`.
+    #[arg(long, requires = "pool")]
+    label: Vec<String>,
     #[arg(long, default_value_t = 0)]
     index: u32,
     /// Exit non-zero if anything identifying is found.
@@ -26,8 +32,13 @@ pub struct TxReport {
     check: bool,
 }
 
-/// Lending, token and native effects are tried in that order.
-fn effect(data: &[u8], shard_program: AccountId) -> String {
+/// Pool effects (by the pool), then lending, token and native effects in that order.
+fn effect(data: &[u8], program: AccountId, shard_program: AccountId, pool: Option<AccountId>) -> String {
+    if Some(program) == pool
+        && let Ok(e) = borsh::from_slice::<bosphorus_pool::Effect>(data)
+    {
+        return format!("pool {e:?}");
+    }
     if shard_program == NATIVE_TOKEN_PROGRAM_ID
         && let Ok(e) = borsh::from_slice::<lee_core::native_token::Effect>(data)
     {
@@ -73,7 +84,7 @@ pub async fn tx_report(client: &Client, cmd: TxReport) -> Result<()> {
             for a in &m.public_actions {
                 println!("    {}", a.account_id);
                 for e in &a.effects {
-                    println!("      by {} on shard of {}: {}", e.program_account_id, e.shard_program_account_id, effect(&e.data, e.shard_program_account_id));
+                    println!("      by {} on shard of {}: {}", e.program_account_id, e.shard_program_account_id, effect(&e.data, e.program_account_id, e.shard_program_account_id, cmd.pool.map(Holder::id)));
                 }
             }
             println!("  private actions: {}", m.private_actions.len());
@@ -88,15 +99,26 @@ pub async fn tx_report(client: &Client, cmd: TxReport) -> Result<()> {
         }
     }
 
-    let Some(holder) = cmd.owner else { return Ok(()) };
-    let market = cmd.market.expect("clap requires --market");
-    let owner = client.owner(holder, &market, cmd.index)?;
-    let mut needles = vec![("owner account id", holder.id().as_ref().to_vec())];
-    if let Holder::Private(id) = holder {
-        needles.push(("position salt", owner.salt.to_vec()));
+    let mut needles = vec![];
+    for label in &cmd.label {
+        let label = bosphorus_client::pool::parse_label(label)?;
+        let pool = cmd.pool.expect("clap requires --pool").id();
+        needles.push(("deposit label", label.to_vec()));
+        needles.push(("deposit record", bosphorus_pool::record_id(&pool, &label).as_ref().to_vec()));
+    }
+    if let Some(holder) = cmd.owner {
+        needles.push(("owner account id", holder.id().as_ref().to_vec()));
+    }
+    if let (Some(holder @ Holder::Private(_)), Some(market)) = (cmd.owner, cmd.market) {
+        needles.push(("position salt", client.owner(holder, &market, cmd.index)?.salt.to_vec()));
+    }
+    if let Some(Holder::Private(id)) = cmd.owner {
         let keys = client.wallet.storage().key_chain().private_account(id).context("not in this wallet")?.key_chain;
         needles.push(("nullifier public key", keys.nullifier_public_key.0.to_vec()));
         needles.push(("viewing public key (first 32 bytes)", keys.viewing_public_key.to_bytes()[..32].to_vec()));
+    }
+    if needles.is_empty() {
+        return Ok(());
     }
     let found: Vec<_> = needles.iter().filter(|(_, n)| contains(&bytes, n)).map(|(what, _)| *what).collect();
     for (what, needle) in &needles {

@@ -1,0 +1,14 @@
+[package]
+name = "bosphorus-disclosure"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Solvency proofs (E11): the request an auditor sends, the per-position check and the digest the
+# proof commits to. No lee_core (constraints §9), and kept out of bosphorus-core so the lending
+# guest's image id doesn't change with it.
+[dependencies]
+borsh.workspace = true
+bosphorus-core.workspace = true
+hmac = "0.12"
+sha2.workspace = true

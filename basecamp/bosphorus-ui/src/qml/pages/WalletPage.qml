@@ -11,6 +11,8 @@ import "../kit/tide.js" as Tide
 // Private account below it, each a list of its non-zero tokens. A row's "Dive ↓" / "Surface ↑" /
 // "Send" opens the move sheet with the token and direction filled in; a move under way shows as a
 // pill in the header of the zone it lands in. Anything touching a private account is proven here.
+// With a screened pool (E10), a dive goes through it by default: its lots show below the
+// surface, summed per token once approved (Surface / Send), one by one while pending (Take back).
 Item {
     id: page
     objectName: "walletPage"
@@ -57,6 +59,23 @@ Item {
     }
     readonly property var aboveRows: rows(aboveId)
     readonly property var belowRows: rows(belowId)
+
+    // An account's screened lots: approved ones summed per token, pending ones one by one.
+    function screenedRows(id) {
+        if (id === "" || !app.pool) return []
+        var out = [], approved = {}
+        app.pool.lots.forEach(function(l) {
+            if (l.account !== id) return
+            var token = l.token || ""
+            var t = { token: token, symbol: token === "" ? "LEZ" : app.tokenSymbol(token), decimals: token === "" ? 0 : app.tokenDecimals(token) }
+            if (l.state === "approved") {
+                if (approved[token] === undefined) { approved[token] = out.length; out.push(Object.assign({ raw: "0", screened: "approved" }, t)) }
+                out[approved[token]].raw = Units.add(out[approved[token]].raw, l.amount)
+            } else out.push(Object.assign({ raw: l.amount, screened: "pending", label: l.label, depositor: l.depositor, canTakeBack: l.can_take_back }, t))
+        })
+        return out
+    }
+    readonly property var belowScreened: screenedRows(belowId)
     readonly property bool belowUnknown: belowId !== "" && nativeOf(belowId) === null
 
     // "Main", "2": the account's own name, without its zone.
@@ -82,23 +101,28 @@ Item {
 
     // ---- the move sheet -----------------------------------------------------------------
 
-    property string kind: "dive"       // dive | surface | send
+    property string kind: "dive"       // dive | surface | send | takeback (a pending lot, back to its depositor)
     property string zone: "above"      // where it leaves from
     property var row: null             // the token row that opened it
     readonly property string fromId: zone === "above" ? aboveId : belowId
-    readonly property string toId: kind === "dive" ? belowId : kind === "surface" ? aboveId : toInput.text.trim()
+    readonly property string toId: kind === "dive" ? belowId : kind === "surface" ? aboveId : kind === "takeback" ? (row ? row.depositor || "" : "") : toInput.text.trim()
     readonly property bool proving: kind !== "send" ? true : zone === "below"
+    // A dive through the screened pool (the default when there is one).
+    property bool screened: true
+    readonly property bool viaPool: kind === "dive" && app.pool !== null && screened
     readonly property var have: {
         if (!row) return null
+        if (row.screened) return row.raw
         return row.token === "" ? nativeOf(fromId) : app.tokenBalance(fromId, row.token)
     }
-    readonly property string raw: row ? Units.parse(amountInput.text, row.decimals) : ""
+    readonly property string raw: !row ? "" : kind === "takeback" ? row.raw : Units.parse(amountInput.text, row.decimals)
     readonly property bool tooMany: amountInput.text.trim() !== "" && raw === ""
     readonly property bool over: raw !== "" && have !== null && Units.cmp(raw, String(have)) > 0
     readonly property bool badAddress: kind === "send" && toId !== "" && !/^Public\/[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(toId)
     readonly property string blocker: {
         if (!app.online) return qsTr("No connection")
         if (page.inflight !== null) return qsTr("Wait for the last move")
+        if (kind === "takeback") return row && row.canTakeBack ? "" : qsTr("Only the account it came from can take it back")
         if (raw === "" || Units.isZero(raw)) return tooMany ? qsTr("Up to %1 decimals").arg(row ? row.decimals : 0) : qsTr("Enter an amount")
         if (over) return qsTr("More than you have")
         if (kind === "send" && toId === "") return qsTr("Add an address")
@@ -111,6 +135,7 @@ Item {
         page.kind = k
         page.zone = z
         page.row = r
+        screenedBox.checked = true
         amountInput.text = ""
         toInput.text = ""
         sheet.open()
@@ -123,22 +148,24 @@ Item {
         if (page.blocker !== "" || !page.row) return
         var p = { from: page.fromId, to: page.toId, amount: page.raw }
         if (page.row.token !== "") p.token = page.row.token
+        var method = page.kind === "takeback" ? "pool_ragequit" : page.row.screened ? "pool_withdraw" : page.viaPool ? "pool_deposit" : "transfer"
+        if (method === "pool_ragequit") p = { holder: page.fromId, label: page.row.label }
         var what = page.amountText
         var proving = Units.isPrivate(page.fromId) || Units.isPrivate(page.toId)
         var record = { title: page.kind === "send" ? qsTr("Sending %1 to %2").arg(what).arg(Units.shortId(page.toId)) : qsTr("Moving %1 to %2").arg(what).arg(page.app.accountName(page.toId)),
                        started: Date.now(), done: false,
                        seen: Units.isPrivate(page.fromId) ? qsTr("%1 arrived somewhere. Not where it came from.").arg(what)
                                                           : qsTr("%1 left your Everyday account. Not where it went.").arg(what) }
-        var arrow = page.kind === "dive" ? " ↓" : page.kind === "surface" ? " ↑" : ""
+        var arrow = page.kind === "dive" ? " ↓" : page.kind === "surface" || page.kind === "takeback" ? " ↑" : ""
         page.inflight = {
-            zone: page.kind === "dive" ? "below" : page.kind === "surface" ? "above" : page.zone,
+            zone: page.kind === "dive" ? "below" : page.kind === "surface" || page.kind === "takeback" ? "above" : page.zone,
             text: page.kind === "send" ? (proving ? qsTr("Sending %1 · %2").arg(what).arg(page.app.diveTime) : qsTr("Sending %1…").arg(what))
                                        : qsTr("%1 on its way%2 · %3").arg(what).arg(arrow).arg(page.app.diveTime),
             proving: proving, record: record
         }
         sheet.close()
         var mine = function() { return page.app.dive && page.app.dive.started === record.started }
-        page.app.call("transfer", p, function(r) {
+        page.app.call(method, p, function(r) {
             page.inflight = null
             if (mine()) { var d = Object.assign({}, page.app.dive); d.done = true; d.tx = r.tx; page.app.dive = d }
             else page.app.notify(qsTr("Moved %1").arg(what), qsTr("tx %1").arg(Units.shortId(r.tx)))
@@ -248,6 +275,67 @@ Item {
                    : tr.deep ? (page.aboveId === "" ? qsTr("Make an Everyday account first") : "")
                    : (page.belowId === "" ? qsTr("Make a Private account first") : "")
                 onClicked: page.open(tr.deep ? "surface" : "dive", tr.deep ? "below" : "above", tr.r)
+            }
+        }
+    }
+
+    // A screened lot below the surface: approved (summed per token) or pending (one deposit).
+    component ScreenedRow: Item {
+        id: sr
+        property var r
+        readonly property bool approved: r.screened === "approved"
+        Layout.fillWidth: true
+        implicitHeight: 50
+        Rectangle { width: parent.width; height: 1; color: "#1FFFFFFF" }
+        Badge { id: sbadge; symbol: sr.r.symbol; anchors.verticalCenter: parent.verticalCenter; opacity: sr.approved ? 1 : 0.6 }
+        Column {
+            anchors.left: sbadge.right
+            anchors.leftMargin: 14
+            anchors.right: samount.left
+            anchors.rightMargin: 14
+            anchors.verticalCenter: parent.verticalCenter
+            LogosText { text: sr.r.symbol + "  ·  " + qsTr("Screened"); font.pixelSize: 15; font.weight: Font.Bold }
+            LogosText {
+                text: sr.approved ? qsTr("Approved: can surface") : qsTr("Waiting for the pool's screening")
+                font.pixelSize: 12; color: sr.approved ? "#B8FFFFFF" : "#8CFFFFFF"
+            }
+        }
+        LogosText {
+            id: samount
+            anchors.right: sactions.left
+            anchors.rightMargin: 14
+            anchors.verticalCenter: parent.verticalCenter
+            text: Units.format(sr.r.raw, sr.r.decimals, Math.min(sr.r.decimals, 8))
+            font.pixelSize: 17; font.weight: Font.DemiBold
+            opacity: sr.approved ? 1 : 0.7
+        }
+        Row {
+            id: sactions
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            width: 168
+            layoutDirection: Qt.RightToLeft
+            spacing: 4
+            Action {
+                visible: sr.approved
+                outline: false
+                text: qsTr("Send")
+                enabled: page.app.online && page.inflight === null
+                onClicked: page.open("send", "below", sr.r)
+            }
+            Action {
+                visible: sr.approved
+                text: qsTr("Surface ↑")
+                enabled: page.app.online && page.inflight === null && page.aboveId !== ""
+                why: page.aboveId === "" ? qsTr("Make an Everyday account first") : ""
+                onClicked: page.open("surface", "below", sr.r)
+            }
+            Action {
+                visible: !sr.approved
+                text: qsTr("Take back")
+                enabled: page.app.online && page.inflight === null && !!sr.r.canTakeBack
+                why: qsTr("Only the account it came from can take it back")
+                onClicked: page.open("takeback", "below", sr.r)
             }
         }
     }
@@ -432,8 +520,9 @@ Item {
                         account: page.belowId
                     }
                     Repeater { model: page.belowRows; delegate: TokenRow { r: modelData; deep: true } }
+                    Repeater { model: page.belowScreened; delegate: ScreenedRow { r: modelData } }
                     LogosText {
-                        visible: page.belowRows.length === 0
+                        visible: page.belowRows.length === 0 && page.belowScreened.length === 0
                         Layout.topMargin: 6
                         text: page.belowId === "" ? qsTr("No Private account yet. Make one from the ⋯ menu.")
                             : page.belowUnknown ? qsTr("Refresh to see what's down here.")
@@ -465,7 +554,8 @@ Item {
                 LogosText {
                     Layout.fillWidth: true
                     text: !page.row ? "" : page.kind === "dive" ? qsTr("Dive %1 below").arg(page.row.symbol)
-                        : page.kind === "surface" ? qsTr("Bring %1 up").arg(page.row.symbol) : qsTr("Send %1").arg(page.row.symbol)
+                        : page.kind === "surface" ? qsTr("Bring %1 up").arg(page.row.symbol)
+                        : page.kind === "takeback" ? qsTr("Take %1 back").arg(page.row.symbol) : qsTr("Send %1").arg(page.row.symbol)
                     font.pixelSize: 21; font.weight: Font.ExtraBold; font.letterSpacing: -0.4
                 }
                 Rectangle {
@@ -489,9 +579,17 @@ Item {
                     color: deep ? Tide.waterDeep : "#1AFFFFFF"
                     LogosText { id: routeLabel; anchors.centerIn: parent; font.pixelSize: 13; font.weight: Font.Bold }
                 }
-                RouteChip { text: page.app.accountName(page.fromId); deep: page.zone === "below" }
+                RouteChip { text: page.app.accountName(page.fromId) + (page.row && page.row.screened ? " · " + qsTr("Screened") : ""); deep: page.zone === "below" }
                 LogosText { text: page.kind === "dive" ? "↓" : "↑"; font.weight: Font.ExtraBold }
-                RouteChip { text: page.toId !== "" ? page.app.accountName(page.toId) : ""; deep: page.zone === "above" }
+                RouteChip { text: page.toId !== "" ? page.app.accountName(page.toId) + (page.viaPool ? " · " + qsTr("Screened") : "") : ""; deep: page.zone === "above" }
+            }
+            LogosCheckbox {
+                id: screenedBox
+                objectName: "screenedBox"
+                visible: page.kind === "dive" && page.app.pool !== null
+                checked: true
+                onCheckedChanged: page.screened = checked
+                text: qsTr("Screened")
             }
             ColumnLayout {
                 visible: page.kind === "send"
@@ -519,7 +617,13 @@ Item {
                 }
             }
 
+            LogosText {
+                visible: page.kind === "takeback"
+                text: page.amountText
+                font.pixelSize: 30; font.weight: Font.ExtraBold
+            }
             ColumnLayout {
+                visible: page.kind !== "takeback"
                 spacing: 6
                 LogosText { text: qsTr("Amount"); font.pixelSize: 13; color: "#BFFFFFFF" }
                 Rectangle {
@@ -566,6 +670,7 @@ Item {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     text: page.over ? qsTr("That's more than you have. You have %1.").arg(has)
+                        : page.row && page.row.screened ? qsTr("You have %1 screened and approved").arg(has)
                         : page.zone === "above" ? qsTr("You have %1 above the surface").arg(has) : qsTr("You have %1 below the surface").arg(has)
                     font.pixelSize: 13
                     color: page.over ? Tide.badText : "#B8FFFFFF"
@@ -578,10 +683,22 @@ Item {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     font.pixelSize: 14
-                    text: "◉  " + (page.kind === "dive" ? qsTr("People see it leave Everyday, not where it went.")
+                    text: "◉  " + (page.kind === "takeback" ? qsTr("It goes back, in public, to %1, where it came from. Anyone can link the two.").arg(page.app.accountName(page.toId))
+                        : page.viaPool ? qsTr("People see it go into the screened pool, not where it went.")
+                        : page.kind === "dive" ? qsTr("People see it leave Everyday, not where it went.")
+                        : page.row && page.row.screened && page.kind === "surface" ? qsTr("Everyone will see it arrive in Everyday from the pool, not which deposit it was.")
+                        : page.row && page.row.screened ? qsTr("They'll see it come from the pool. No one can tell which deposit it was.")
                         : page.kind === "surface" ? qsTr("Everyone will see it arrive in Everyday.")
                         : page.zone === "above" ? qsTr("Anyone can see this payment and that it came from you.")
                         : qsTr("They'll see it arrive. No one can tell it came from you."))
+                }
+                LogosText {
+                    visible: page.viaPool
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    font.pixelSize: 14
+                    color: "#BFFFFFFF"
+                    text: "✓  " + qsTr("The pool checks where it came from, so you can show it didn't come from a listed address. It can surface once approved; until then you can take it back.")
                 }
                 LogosText {
                     Layout.fillWidth: true
@@ -596,7 +713,8 @@ Item {
                 Layout.fillWidth: true
                 enabled: page.blocker === ""
                 text: page.blocker !== "" ? page.blocker
-                    : (page.kind === "dive" ? qsTr("Dive %1 ↓") : page.kind === "surface" ? qsTr("Surface %1 ↑") : qsTr("Send %1")).arg(page.amountText)
+                    : (page.kind === "dive" ? qsTr("Dive %1 ↓") : page.kind === "surface" ? qsTr("Surface %1 ↑")
+                       : page.kind === "takeback" ? qsTr("Take %1 back") : qsTr("Send %1")).arg(page.amountText)
                 onClicked: page.confirm()
             }
         }

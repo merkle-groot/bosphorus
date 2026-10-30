@@ -24,10 +24,10 @@ extern "C" {
 // polls both.
 //
 // Requests to `start`: `create_wallet` {"sequencer", "mnemonic"?, "sync_from"?}, `open`
-// {"lending"}, and every method of the app API but `wait` (it would hold a worker for up to an
+// {"lending", "pool"?}, and every method of the app API but `wait` (it would hold a worker for up to an
 // hour; poll `job` instead).
 //
-// `<persistence>/settings.json` ({"sequencer"?, "lending"?}), if present, fills in what a
+// `<persistence>/settings.json` ({"sequencer"?, "lending"?, "pool"?}), if present, fills in what a
 // `create_wallet` or `open` request leaves out, and `status` returns it for the view's fields.
 // Its "tokens" object ({"Public/<token id>": "SYMBOL"}) names tokens in the view. Dev only: its "prefill" object ({"transfer_to", "transfer_amount", "amount", "to", "index"},
 // strings) fills the view's input fields at start and on Refresh.

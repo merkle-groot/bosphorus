@@ -114,6 +114,10 @@ impl Keeper {
         for position in self.scanner.scan(&self.client).await? {
             log(format!("found position {position}"));
         }
+        // Positions first touched in blocks the sequencer didn't return are invisible to us.
+        for (a, b) in std::mem::take(&mut self.scanner.missing) {
+            log(format!("WARNING: the sequencer didn't return blocks {a}..={b}; positions touched only there are unknown"));
+        }
         let mut by_market: BTreeMap<MarketId, Vec<AccountId>> = BTreeMap::new();
         for (position, market) in &self.scanner.positions {
             by_market.entry(*market).or_default().push(*position);

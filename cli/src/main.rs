@@ -4,6 +4,8 @@
 //! Private txs need real proofs, or `RISC0_DEV_MODE=1` against a dev-mode sequencer.
 
 mod lending;
+mod disclose;
+mod pool;
 mod report;
 
 use anyhow::{Context as _, Result};
@@ -29,6 +31,12 @@ enum Command {
     /// Create markets and act on positions.
     #[command(subcommand)]
     Market(lending::MarketCmd),
+    /// The screened pool (E10): deposits, withdrawals, ragequit, and the ASP.
+    #[command(subcommand)]
+    Pool(pool::PoolCmd),
+    /// Solvency proofs (E11): prove a position meets claims without saying which it is.
+    #[command(subcommand)]
+    Disclose(disclose::DiscloseCmd),
     /// A market's utilisation and rates, and optionally a position's health.
     Status(lending::Status),
     /// What a tx published, and a scan for an owner's identifying bytes.
@@ -178,9 +186,14 @@ fn main() -> Result<()> {
 }
 
 async fn run(command: Command) -> Result<()> {
+    if let Command::Disclose(cmd) = &command
+        && let Some(done) = disclose::verify(cmd)
+    {
+        return done;
+    }
     if let Command::Programs { write_dir } = &command {
         // No wallet needed.
-        for (name, elf) in [("token", TOKEN_ELF), ("oracle", ORACLE_ELF), ("lending", LENDING_ELF)] {
+        for (name, elf) in [("token", TOKEN_ELF), ("oracle", ORACLE_ELF), ("lending", LENDING_ELF), ("pool", bosphorus_client::POOL_ELF), ("disclosure", bosphorus_client::disclosure::DISCLOSURE_ELF)] {
             println!("{name} {} {} bytes", bosphorus_client::hex_id(&bosphorus_client::image_id(elf)?), elf.len());
             if let Some(dir) = write_dir {
                 std::fs::create_dir_all(dir)?;
@@ -239,6 +252,8 @@ async fn run(command: Command) -> Result<()> {
         }
         Command::Lending(cmd) => lending::admin(&client, cmd).await?,
         Command::Market(cmd) => lending::market(&mut client, cmd).await?,
+        Command::Pool(cmd) => pool::run(&mut client, cmd).await?,
+        Command::Disclose(cmd) => disclose::run(&client, cmd).await?,
         Command::Status(cmd) => lending::status(&client, cmd).await?,
         Command::TxReport(cmd) => report::tx_report(&client, cmd).await?,
         Command::Check { lending, oracle, token } => {

@@ -45,6 +45,7 @@ Item {
     property var info: null
     property var prover: null
     property var accounts: []
+    property var pool: null            // `pool`: the screened pool and this wallet's lots; null without one
     property var markets: []
     property var marketDetails: ({})   // market id → `market`
     property var positions: ({})       // "market|account" → `positions`
@@ -132,6 +133,8 @@ Item {
         case "stopping": return qsTr("Bosphorus is closing.")
         case "not_open": return qsTr("The wallet isn't open yet.")
         case "lost": return qsTr("Bosphorus lost track of that request. Check Activity and your balances before trying again.")
+        case "not_approved": return qsTr("The pool hasn't approved enough of this yet. Wait for its screening, or take it back.")
+        case "no_pool": return qsTr("No screened pool is set up for this network.")
         }
         return m.length > 0 ? m : String(error.code || qsTr("Something went wrong"))
     }
@@ -320,7 +323,12 @@ Item {
             root.accounts = r
             if (root.actAs === "" && r.length > 0) root.actAs = r[0].account
             refreshMarkets(true)
+            refreshPool()
         }, function(e) { root.refreshing = false; root.quietly(e) })
+    }
+
+    function refreshPool() {
+        call("pool", {}, function(r) { root.pool = r }, function(e) { if (e.code === "no_pool") root.pool = null; else root.quietly(e) })
     }
 
     // Markets and their details; with `portfolio`, every account's positions and balances too.

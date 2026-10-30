@@ -11,7 +11,7 @@ use bosphorus_prover::execute_and_prove;
 #[cfg(not(feature = "prove"))]
 use lee::privacy_preserving_transaction::circuit::execute_and_prove;
 use lee::{
-    Account, AccountId, PrivacyPreservingTransaction,
+    Account, AccountId, PrivacyPreservingTransaction, PrivateKey,
     privacy_preserving_transaction::{
         Message, WitnessSet,
         circuit::{ProgramWithDependencies, ProvingInput},
@@ -25,7 +25,7 @@ use lee_core::{
     encryption::ViewingPublicKey,
 };
 
-use super::Chain;
+use super::{Chain, addr};
 
 #[derive(Clone)]
 pub struct Keys {
@@ -130,20 +130,37 @@ impl Chain {
         witnesses: Vec<PrivateWitness>,
         instruction: I,
     ) -> Result<PrivacyPreservingTransaction> {
+        self.prove_signed(program, elf, deps, selectors, &[], witnesses, instruction)
+    }
+
+    /// [`Self::prove`] with public accounts signing too (a public payer, as in a shield).
+    #[allow(clippy::too_many_arguments, reason = "the parts of one private tx")]
+    pub fn prove_signed<I: BorshSerialize>(
+        &self,
+        program: AccountId,
+        elf: &'static [u8],
+        deps: &[(AccountId, &'static [u8])],
+        selectors: Vec<(AccountId, AccountId)>,
+        signers: &[&PrivateKey],
+        witnesses: Vec<PrivateWitness>,
+        instruction: I,
+    ) -> Result<PrivacyPreservingTransaction> {
         let load = |elf: &'static [u8]| Program::new(Cow::Borrowed(elf)).expect("a valid guest");
         let deps: HashMap<_, _> = deps.iter().map(|(id, elf)| (*id, load(elf))).collect();
         let with_deps = ProgramWithDependencies::new(load(elf), program, deps);
         let (output, proof) = execute_and_prove(
             ProvingInput {
                 shard_selectors: selectors.into_iter().map(|(a, p)| ProgramShardSelector::new(a, p)).collect(),
+                signers: signers.iter().map(|k| addr(k)).collect(),
                 private_witnesses: witnesses,
                 instruction_data: Program::serialize_instruction(instruction)?,
                 ..Default::default()
             },
             &with_deps,
         )?;
-        let message = Message::from_circuit_output(vec![], output);
-        let witness_set = WitnessSet::for_message(&message, proof, &[]);
+        let nonces = signers.iter().map(|k| self.state.get_account_by_id(addr(k)).nonce).collect();
+        let message = Message::from_circuit_output(nonces, output);
+        let witness_set = WitnessSet::for_message(&message, proof, signers);
         Ok(PrivacyPreservingTransaction::new(message, witness_set))
     }
 

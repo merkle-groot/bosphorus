@@ -6,8 +6,10 @@
 //! Each tx also logs one `[measure]` line to stderr (plan 5.3): submission time, proving time,
 //! inclusion block and its timestamp, and the fee when the payer is known.
 
+pub mod disclosure;
 pub mod funds;
 pub mod lending;
+pub mod pool;
 pub mod proving;
 
 use std::{borrow::Cow, collections::HashMap, fmt, str::FromStr};
@@ -25,7 +27,7 @@ use wallet::{
     AccDecodeData, AccountIdentity, AccountMention, WalletCore, program_facades::program_loader::ProgramLoader,
 };
 
-pub use bosphorus_methods::{LENDING_ELF, ORACLE_ELF, TOKEN_ELF};
+pub use bosphorus_methods::{LENDING_ELF, ORACLE_ELF, POOL_ELF, TOKEN_ELF};
 pub use bosphorus_oracle::{Feed, U256};
 pub use bosphorus_token::Config as TokenConfig;
 

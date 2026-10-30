@@ -28,7 +28,7 @@ typedef struct BosAppOpenOutput {
 
 /**
  * Opens the app on a wallet and resumes its unfinished jobs. `config_json`:
- * `{"wallet_home", "lending": "Public/<id>", "data_dir"?, "scan_from"?}`. The wallet must exist
+ * `{"wallet_home", "lending": "Public/<id>", "data_dir"?, "scan_from"?, "pool"?: "Public/<id>"}`. The wallet must exist
  * (`wallet_config.json`, `storage.json`); `data_dir` defaults to `<wallet_home>/bosphorus-app`.
  *
  * The app must be the only writer of that wallet while it is open. It locks the wallet and data

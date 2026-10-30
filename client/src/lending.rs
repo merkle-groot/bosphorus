@@ -951,12 +951,15 @@ pub struct Scanner {
     pub markets: std::collections::BTreeSet<MarketId>,
     /// Position → its market.
     pub positions: BTreeMap<AccountId, MarketId>,
+    /// Block ranges the sequencer didn't return (seen on localnet after a full disk: the state has
+    /// the blocks, the block store doesn't). Whatever they touched is missing from the scan.
+    pub missing: Vec<(u64, u64)>,
     seen: HashSet<AccountId>,
 }
 
 impl Scanner {
     pub fn new(lending: AccountId, from_block: u64) -> Self {
-        Self { lending, next_block: from_block.max(1), markets: Default::default(), positions: BTreeMap::new(), seen: HashSet::new() }
+        Self { lending, next_block: from_block.max(1), markets: Default::default(), positions: BTreeMap::new(), missing: vec![], seen: HashSet::new() }
     }
 
     /// Scans up to the chain head. Returns the positions found in this call.
@@ -968,7 +971,13 @@ impl Scanner {
         while self.next_block <= last {
             let end = (self.next_block + CHUNK - 1).min(last);
             let mut candidates = vec![];
+            let mut expected = self.next_block;
             for block in rpc.get_block_range(self.next_block, end).await? {
+                let id = block.header.block_id;
+                if id > expected {
+                    self.missing.push((expected, id - 1));
+                }
+                expected = expected.max(id + 1);
                 for tx in &block.body.transactions {
                     candidates.extend(lending_accounts(tx, self.lending));
                 }
@@ -990,6 +999,9 @@ impl Scanner {
                     Some(Shard::Config(_)) => {}
                 }
                 self.seen.insert(account);
+            }
+            if expected <= end {
+                self.missing.push((expected, end));
             }
             self.next_block = end + 1;
         }

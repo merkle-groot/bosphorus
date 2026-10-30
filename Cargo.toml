@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
     "core",
+    "provenance",
+    "disclosure",
     "client",
     "app",
     "ffi",
@@ -13,6 +15,9 @@ members = [
     "programs/oracle/guest",
     "programs/lending/core",
     "programs/lending/guest",
+    "programs/pool/core",
+    "programs/pool/guest",
+    "programs/disclosure",
     "programs/test-caller",
     "programs/methods",
     "spikes/methods",
@@ -45,9 +50,12 @@ ruint = { version = "1.20", features = ["borsh"] }
 proptest = "1.11"
 
 bosphorus-core = { path = "core" }
+bosphorus-provenance = { path = "provenance" }
+bosphorus-disclosure = { path = "disclosure" }
 bosphorus-token = { path = "programs/token/core" }
 bosphorus-oracle = { path = "programs/oracle/core" }
 bosphorus-lending = { path = "programs/lending/core" }
+bosphorus-pool = { path = "programs/pool/core" }
 bosphorus-methods = { path = "programs/methods" }
 spike-methods = { path = "spikes/methods" }
 bosphorus-prover = { path = "prover" }

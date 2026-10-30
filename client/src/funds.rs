@@ -17,13 +17,13 @@ use wallet::{AccDecodeData, AccountIdentity, WalletCore, program_facades::native
 
 use crate::{Client, Holder, TOKEN_ELF, no_sign, now_ms, send_error};
 
-/// A transfer handed to the sequencer ([`Client::send_transfer`]).
+/// A transfer handed to the sequencer ([`Client::send_transfer`], or a pool op).
 pub struct TransferSent {
     pub hash: HashType,
     /// The notes to decode once it lands: one shared secret per private account.
-    decode: Vec<(SharedSecretKey, AccountId)>,
-    label: &'static str,
-    started_ms: u64,
+    pub(crate) decode: Vec<(SharedSecretKey, AccountId)>,
+    pub(crate) label: &'static str,
+    pub(crate) started_ms: u64,
     pub submitted_ms: u64,
 }
 
