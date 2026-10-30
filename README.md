@@ -15,7 +15,7 @@ they can use privacy: **screened deposits** (Privacy Pools) and **solvency proof
 ![Status](https://img.shields.io/badge/status-experimental-lightgrey?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue?style=flat-square)
 
-[Compliance](#-private-and-compliant) · [TL;DR](#-tldr) · [Architecture](#-architecture) · [Claims](#-the-bounds-pattern) · [Privacy](#-privacy) · [Prover](#-the-gpu-prover) · [Privacy Pools](#-screened-pool-privacy-pools) · [Solvency proofs](#-solvency-proofs) · [Build](#-build) · [Limits](#-known-limits)
+[Compliance](#-private-and-compliant) · [TL;DR](#-tldr) · [App](#-the-app) · [Architecture](#-architecture) · [Claims](#-the-bounds-pattern) · [Privacy](#-privacy) · [Prover](#-the-gpu-prover) · [Privacy Pools](#-screened-pool-privacy-pools) · [Solvency proofs](#-solvency-proofs) · [Build](#-build) · [Limits](#-known-limits)
 
 </div>
 
@@ -70,6 +70,30 @@ Both are early experiments. See [Known limits](#-known-limits).
 └──────────────────────────────────┘              │ signer      none               │
  BELOW THE SURFACE · your laptop                  └────────────────────────────────┘
 ```
+
+---
+
+## 📱 The app
+
+A [Basecamp](https://logos.co) module. Public balances sit above the surface and private ones below;
+a position's health is a water level.
+
+<p align="center"><img src="site/img/app-wallet.png" alt="Wallet: public accounts above the surface, private accounts below, with Dive and Surface buttons" width="100%"></p>
+<p align="center"><sub><b>Wallet.</b> Dive moves tokens into your private account; Surface brings them back.</sub></p>
+
+<table>
+<tr>
+<td width="50%"><img src="site/img/app-markets.png" alt="Markets: rates, utilisation, borrowing limit and a fresh WBTC price"></td>
+<td width="50%"><img src="site/img/app-position.png" alt="Position: a private position close to its sell line, shown as red water"></td>
+</tr>
+<tr>
+<td align="center"><sub><b>Markets.</b> What savers earn, what borrowers pay, the sell line and a fresh price.</sub></td>
+<td align="center"><sub><b>Position.</b> Health as a water level. This private position is close to its sell line.</sub></td>
+</tr>
+</table>
+
+<p align="center"><img src="site/img/app-activity.png" alt="Activity: private borrows and collateral, each proved on the GPU in about a minute" width="100%"></p>
+<p align="center"><sub><b>Activity.</b> Every op is a job that survives restarts, proved on this laptop's GPU in about a minute.</sub></p>
 
 ---
 
