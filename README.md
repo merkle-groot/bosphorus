@@ -5,7 +5,8 @@
 **Borrow and lend on Logos without telling the world it's you.**
 
 A lending market on the [Logos Execution Zone](https://github.com/logos-blockchain/logos-execution-zone):
-Morpho Blue-style isolated markets, private owners, and zero-knowledge proofs built on your own laptop's GPU.
+Morpho Blue-style isolated markets with private owners, plus the two things institutions need before
+they can use privacy: **screened deposits** and **solvency proofs**.
 
 ![LEZ](https://img.shields.io/badge/LEZ-v0.3.1-1f4b8f?style=flat-square)
 ![risc0](https://img.shields.io/badge/risc0-3.0.5-0b1220?style=flat-square)
@@ -14,9 +15,23 @@ Morpho Blue-style isolated markets, private owners, and zero-knowledge proofs bu
 ![Status](https://img.shields.io/badge/status-experimental-lightgrey?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue?style=flat-square)
 
-[TL;DR](#-tldr) · [Architecture](#-architecture) · [Claims](#-the-bounds-pattern) · [Privacy](#-privacy) · [Prover](#-the-gpu-prover) · [Pool](#-screened-pool) · [Solvency proofs](#-solvency-proofs) · [Build](#-build) · [Limits](#-known-limits)
+[Compliance](#-private-and-compliant) · [TL;DR](#-tldr) · [Architecture](#-architecture) · [Claims](#-the-bounds-pattern) · [Privacy](#-privacy) · [Prover](#-the-gpu-prover) · [Pool](#-screened-pool) · [Solvency proofs](#-solvency-proofs) · [Build](#-build) · [Limits](#-known-limits)
 
 </div>
+
+---
+
+## 🏛 Private and compliant
+
+Institutions want privacy from the market, not from their auditors. Bosphorus gives them both:
+
+- 🛡 **Screened deposits.** Money enters through a screened pool. A screener approves clean
+  deposits, and you can later prove yours is one of them without saying which. Never approved?
+  You can always take it back.
+- 📜 **Solvency proofs.** Prove to an auditor that one of a market's positions is yours and is
+  healthy, without revealing which one. Takes 6–10 seconds.
+
+Both are early experiments. See [Known limits](#-known-limits).
 
 ---
 
@@ -35,9 +50,7 @@ Morpho Blue-style isolated markets, private owners, and zero-knowledge proofs bu
 - **⚡ The optimized prover.** risc0 3.0.5 has no Metal backend, so a private borrow took
   **~10 minutes** on an M1. We wrote GPU kernels for it and our own proving schedule: **618 s → ~47 s**
   for a real borrow on an 8 GB M1 Air. A stock risc0 verifier accepts the proofs.
-- **Compliance without surveillance.** A screened pool (Privacy Pools on LEZ) lets clean money in
-  without saying whose it is. Solvency proofs let you show an auditor "one of these positions is
-  mine and it's healthy" without saying which one.
+- **Compliance without surveillance.** Screened deposits and solvency proofs, [above](#-private-and-compliant).
 - **Everything runs on your machine.** The app, the client, the maths, the prover and the wallet.
   There's no server and no account with us. Ships as a [Basecamp](https://logos.co) module.
 
@@ -476,6 +489,8 @@ these are the ones that matter most today:
 - **Private borrowers rescue slowly**: a top-up or repay takes about a minute to prove, so borrow
   with a wide margin.
 - **Solvency proofs' anonymity depends on the cover set**, which a hostile auditor can shrink.
+- **Screening stops at the pool.** Lending markets accept any funds today; screened-only markets
+  aren't designed yet.
 - **Risk features:** the IRM is Aave-shaped, but Aave v3's borrow-LTV split, supply and borrow caps
   and close factor aren't built yet.
 - **Targets LEZ v0.3.1 only**, and programs are immutable: a new build means a new deployment.
