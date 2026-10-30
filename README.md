@@ -6,7 +6,7 @@
 
 A lending market on the [Logos Execution Zone](https://github.com/logos-blockchain/logos-execution-zone):
 Morpho Blue-style isolated markets with private owners, plus the two things institutions need before
-they can use privacy: **screened deposits** and **solvency proofs**.
+they can use privacy: **screened deposits** (Privacy Pools) and **solvency proofs**.
 
 ![LEZ](https://img.shields.io/badge/LEZ-v0.3.1-1f4b8f?style=flat-square)
 ![risc0](https://img.shields.io/badge/risc0-3.0.5-0b1220?style=flat-square)
@@ -15,7 +15,7 @@ they can use privacy: **screened deposits** and **solvency proofs**.
 ![Status](https://img.shields.io/badge/status-experimental-lightgrey?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue?style=flat-square)
 
-[Compliance](#-private-and-compliant) · [TL;DR](#-tldr) · [Architecture](#-architecture) · [Claims](#-the-bounds-pattern) · [Privacy](#-privacy) · [Prover](#-the-gpu-prover) · [Pool](#-screened-pool) · [Solvency proofs](#-solvency-proofs) · [Build](#-build) · [Limits](#-known-limits)
+[Compliance](#-private-and-compliant) · [TL;DR](#-tldr) · [Architecture](#-architecture) · [Claims](#-the-bounds-pattern) · [Privacy](#-privacy) · [Prover](#-the-gpu-prover) · [Privacy Pools](#-screened-pool-privacy-pools) · [Solvency proofs](#-solvency-proofs) · [Build](#-build) · [Limits](#-known-limits)
 
 </div>
 
@@ -25,7 +25,8 @@ they can use privacy: **screened deposits** and **solvency proofs**.
 
 Institutions want privacy from the market, not from their auditors. Bosphorus gives them both:
 
-- 🛡 **Screened deposits.** Money enters through a screened pool. A screener approves clean
+- 🛡 **Screened deposits, with Privacy Pools.** Money enters through a screened pool built on the
+  [Privacy Pools](https://privacypools.com) design. A screener approves clean
   deposits, and you can later prove yours is one of them without saying which. Never approved?
   You can always take it back.
 - 📜 **Solvency proofs.** Prove to an auditor that one of a market's positions is yours and is
@@ -50,7 +51,7 @@ Both are early experiments. See [Known limits](#-known-limits).
 - **⚡ The optimized prover.** risc0 3.0.5 has no Metal backend, so a private borrow took
   **~10 minutes** on an M1. We wrote GPU kernels for it and our own proving schedule: **618 s → ~47 s**
   for a real borrow on an 8 GB M1 Air. A stock risc0 verifier accepts the proofs.
-- **Compliance without surveillance.** Screened deposits and solvency proofs, [above](#-private-and-compliant).
+- **Compliance without surveillance.** Screened deposits (Privacy Pools) and solvency proofs, [above](#-private-and-compliant).
 - **Everything runs on your machine.** The app, the client, the maths, the prover and the wallet.
   There's no server and no account with us. Ships as a [Basecamp](https://logos.co) module.
 
@@ -334,7 +335,7 @@ BENCH_CPU=1 ./scripts/bench-proving.sh  # CPU only: the number to compare across
 
 ---
 
-## 🛡 Screened pool
+## 🛡 Screened pool (Privacy Pools)
 
 *"What if it's dirty money?"* The pool brings the Privacy Pools model to LEZ as one ordinary program,
 with LEZ's private accounts doing the hiding.
@@ -446,7 +447,7 @@ Then run the end-to-end scripts. They expect the wallet binary at
 | `scripts/phase3-e2e.sh` | liquidations by the keeper, fee claims |
 | `scripts/phase4-e2e.sh` | private positions, recovery by index, tx privacy reports |
 | `scripts/e9-held.sh` | lender shares held on a private account |
-| `scripts/e10-pool.sh` | the screened pool: deposit, approve, withdraw, ragequit |
+| `scripts/e10-pool.sh` | the screened pool (Privacy Pools): deposit, approve, withdraw, ragequit |
 | `scripts/e11-disclosure.sh` | solvency proofs: request, prove, verify |
 | `scripts/app-e2e.sh` | the `bos-app` API, including restarts mid-job |
 | `scripts/ffi-smoke.sh` | the C ABI |
