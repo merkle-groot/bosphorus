@@ -15,6 +15,7 @@ import Logos.Controls
 import "kit" as Kit
 import "kit/units.js" as Units
 import "kit/tide.js" as Tide
+import "kit/tour.js" as Tour
 import "pages" as Pages
 
 Item {
@@ -24,10 +25,16 @@ Item {
     readonly property var backend: typeof logos !== "undefined" && logos.module ? logos.module("bosphorus_ui") : null
     property bool backendReady: false
 
-    // "loading" → "welcome" (no wallet: start | phrase | restore, then ready) → "main".
+    // "loading" → "welcome" (no wallet: start | phrase | restore, then arriving or ready) → "main".
     property string screen: "loading"
     property string welcomeStep: "start"
     property string phrase: ""
+    // With a faucet, a wallet is made as Welcome opens (unconfirmed until its phrase is
+    // acknowledged), so its starter claim proves while the user reads. `premade`: it exists;
+    // `premaking`: being made; `wantPhrase`: "Create a wallet" was pressed before it was ready.
+    property bool premade: false
+    property bool premaking: false
+    property bool wantPhrase: false
     property bool busy: false
     property string openError: ""
     // A restored wallet looks through the chain for its money once it opens.
@@ -35,10 +42,13 @@ Item {
     property bool restoreSyncing: false
 
     // From the core's settings.json (status.settings); the defaults are the LEZ testnet and the
-    // lending program deployed there (DEPLOYMENTS.md).
+    // programs deployed there (DEPLOYMENTS.md).
     property string sequencerUrl: "https://testnet.lez.logos.co"
     property string lendingId: "Public/8mnAx1h5Utbi1XCMUaHdACn6qM87Sek9NgKvdy2ewRKF"
+    property string faucetId: ""
+    property var scanFrom: null
     property var tokenNames: ({})
+    property var marketIds: []
     property var prefill: ({})
 
     // Chain and wallet state, replaced (never mutated) so bindings see every change.
@@ -46,6 +56,10 @@ Item {
     property var prover: null
     property var accounts: []
     property var pool: null            // `pool`: the screened pool and this wallet's lots; null without one
+    property var faucet: null          // `faucet`: its drops and when each can next be claimed; null without one
+    property var uiState: ({})         // `ui_state`: { tourDone, hidden }
+    property var claiming: ({})        // "gas" or a token id → a claim on its way
+    property bool showSellLine: false  // the tour's "Watch the water" step
     property var markets: []
     property var marketDetails: ({})   // market id → `market`
     property var positions: ({})       // "market|account" → `positions`
@@ -72,7 +86,11 @@ Item {
     // Navigation: Wallet, Markets, Position, Activity.
     property int tab: 0
     // Dev: a tab change re-reads settings.json, so a test can change the prefill between steps.
-    onTabChanged: if (root.screen === "main") reloadSettings()
+    onTabChanged: {
+        if (root.screen === "main") reloadSettings()
+        // A finished guide ends on the Wallet, where the bar takes over.
+        if (root.tab === 0 && root.coachGoal !== "" && root.checklist[root.coachGoal === "borrow" ? 1 : 2].done) root.coachGoal = ""
+    }
     property string openMarket: ""     // the market Markets shows and Position acts in
     property string actAs: ""          // the account Position acts as
     property int slot: 0               // its position index (private accounts)
@@ -135,6 +153,8 @@ Item {
         case "lost": return qsTr("Bosphorus lost track of that request. Check Activity and your balances before trying again.")
         case "not_approved": return qsTr("The pool hasn't approved enough of this yet. Wait for its screening, or take it back.")
         case "no_pool": return qsTr("No screened pool is set up for this network.")
+        case "faucet_cooldown": return qsTr("You've had today's share of this. Come back tomorrow.")
+        case "no_faucet": return qsTr("No faucet is set up for this network.")
         }
         return m.length > 0 ? m : String(error.code || qsTr("Something went wrong"))
     }
@@ -232,7 +252,10 @@ Item {
         if (!s) return
         if (s.sequencer) root.sequencerUrl = s.sequencer
         if (s.lending) root.lendingId = s.lending
-        root.tokenNames = s.tokens || {}
+        if (s.faucet) root.faucetId = s.faucet
+        if (s.scan_from !== undefined) root.scanFrom = s.scan_from
+        if (s.tokens) root.tokenNames = s.tokens
+        if (s.markets) root.marketIds = s.markets
         root.prefill = s.prefill || {}
     }
 
@@ -240,15 +263,65 @@ Item {
         watch(backend.status(), function(raw) {
             var s = JSON.parse(String(raw))
             applySettings(s.settings)
-            if (s.open) { root.prover = s.open_result ? s.open_result.prover : null; enterMain() }
+            // Made in the background but its phrase never acknowledged: nobody could recover it.
+            if (s.wallet_unconfirmed) call("discard_wallet", {}, discarded, function(e) { if (e.code === "confirmed") openWallet(false); else { root.openError = explain(e); root.screen = "welcome" } })
+            else if (s.open) { root.prover = s.open_result ? s.open_result.prover : null; enterMain() }
             else if (s.wallet_exists) openWallet(false)
-            else { root.screen = "welcome"; root.welcomeStep = "start" }
+            else showWelcome()
         }, function(e) { root.openError = e; root.screen = "welcome" })
     }
 
     // Re-reads settings.json (token names, dev prefill) without reopening.
     function reloadSettings() {
         watch(backend.status(), function(raw) { applySettings(JSON.parse(String(raw)).settings) }, function(e) {})
+    }
+
+    function showWelcome() {
+        root.screen = "welcome"
+        root.welcomeStep = "start"
+        premakeWallet()
+    }
+    // After a discard has finished (its files are gone), a new background wallet can be made.
+    function discarded() { root.premade = false; root.accounts = []; root.starterQueue = []; showWelcome() }
+
+    // The background wallet (see `premade`): made, opened, and its starter claim started.
+    function premakeWallet() {
+        if (root.faucetId === "" || root.premade || root.premaking) return
+        root.premaking = true
+        call("create_wallet", { sequencer: root.sequencerUrl }, function(result) {
+            root.premaking = false
+            root.premade = true
+            root.phrase = result.mnemonic
+            if (root.wantPhrase) { root.wantPhrase = false; root.busy = false; root.welcomeStep = "phrase" }
+            openForStarter()
+        }, function(e) { root.premaking = false; if (root.wantPhrase) { root.wantPhrase = false; root.busy = false; root.openError = explain(e) } })
+    }
+    // "Create a wallet": the background one if there is one (or will be), else a new one.
+    function newWallet() {
+        root.openError = ""
+        if (root.premade) { root.welcomeStep = "phrase"; return }
+        if (root.premaking) { root.wantPhrase = true; root.busy = true; return }
+        createWallet("", "")
+    }
+    // "Restore": the background wallet goes first (it was never confirmed).
+    function restoreWallet(words, syncFrom) {
+        if (!root.premade) { createWallet(words, syncFrom); return }
+        root.busy = true
+        call("discard_wallet", {}, function() {
+            root.premade = false; root.phrase = ""; root.accounts = []; root.starterQueue = []
+            createWallet(words, syncFrom)
+        }, function(e) { root.busy = false; root.openError = explain(e) })
+    }
+    // The phrase was shown and acknowledged: the wallet is kept for good. While its starter is on
+    // its way, the arriving screen explains what comes next.
+    function confirmWallet() {
+        call("confirm_wallet", {}, function() {
+            root.premade = false
+            root.phrase = ""
+            if (root.starterRunning) root.welcomeStep = "arriving"
+            else if (root.accounts.length > 0) enterMain()
+            else openWallet(true)
+        }, function(e) { root.openError = explain(e) })
     }
 
     function createWallet(mnemonic, syncFrom) {
@@ -259,9 +332,24 @@ Item {
         root.restoring = !!mnemonic
         call("create_wallet", p, function(result) {
             root.busy = false
-            if (result.mnemonic) { root.phrase = result.mnemonic; root.welcomeStep = "phrase" }
+            if (result.mnemonic) { root.phrase = result.mnemonic; root.welcomeStep = "phrase"; openForStarter() }
             else openWallet(true)
         }, function(e) { root.busy = false; root.openError = explain(e) })
+    }
+
+    // A new wallet opens before its phrase is on screen, so the starter's proof runs meanwhile.
+    function openForStarter() {
+        if (root.faucetId === "") return
+        call("open", openParams(), function(result) {
+            root.prover = result.prover
+            call("accounts", {}, function(r) { root.accounts = r; refreshMarkets(false); refreshFaucet(); startStarter() }, function() {})
+        }, function() {})
+    }
+    function openParams() {
+        var p = { lending: root.lendingId }
+        if (root.faucetId !== "") p.faucet = root.faucetId
+        if (root.scanFrom !== null) p.scan_from = root.scanFrom
+        return p
     }
 
     // `fresh`: a wallet just made or restored, which lands on "You're afloat" first.
@@ -269,7 +357,7 @@ Item {
         root.busy = true
         root.openError = ""
         if (!fresh) root.screen = "loading"
-        call("open", { lending: root.lendingId }, function(result) {
+        call("open", openParams(), function(result) {
             root.busy = false
             root.prover = result.prover
             if (fresh) {
@@ -291,6 +379,9 @@ Item {
         root.screen = "main"
         refreshAll()
         refreshJobs()
+        // The tour no longer starts by itself: the next-step bar offers it once the first steps
+        // are done (doing beats reading about it).
+        call("ui_state", {}, function(r) { root.uiState = r }, function() {})
     }
 
     function refreshInfo(then) {
@@ -324,6 +415,7 @@ Item {
             if (root.actAs === "" && r.length > 0) root.actAs = r[0].account
             refreshMarkets(true)
             refreshPool()
+            refreshFaucet()
         }, function(e) { root.refreshing = false; root.quietly(e) })
     }
 
@@ -331,9 +423,285 @@ Item {
         call("pool", {}, function(r) { root.pool = r }, function(e) { if (e.code === "no_pool") root.pool = null; else root.quietly(e) })
     }
 
+    // ---- onboarding: the faucet, the checklist, the tour ----------------------------------
+
+    readonly property string everydayId: { for (var i = 0; i < root.accounts.length; i++) if (!Units.isPrivate(root.accounts[i].account)) return root.accounts[i].account; return "" }
+    readonly property string privateId: { for (var i = 0; i < root.accounts.length; i++) if (Units.isPrivate(root.accounts[i].account)) return root.accounts[i].account; return "" }
+
+    function refreshFaucet() {
+        if (root.faucetId === "") { root.faucet = null; return }
+        var p = {}
+        if (root.privateId !== "") p.claimer = root.privateId
+        call("faucet", p, function(r) { root.faucet = r }, function(e) { if (e.code === "no_faucet") root.faucet = null; else root.quietly(e) })
+    }
+
+    function saveUi(patch) {
+        var s = Object.assign({}, root.uiState, patch)
+        root.uiState = s
+        call("ui_state", { set: s }, function() {}, function() {})
+    }
+
+    // A token's id from its symbol (settings.json names them), "" if none.
+    function tokenId(symbol) {
+        for (var id in root.tokenNames) if (root.tokenNames[id] === symbol) return id
+        return ""
+    }
+    // The faucet's drop of a token ("" for LEZ), or null.
+    function dropOf(token) {
+        if (!root.faucet) return null
+        for (var i = 0; i < root.faucet.drops.length; i++) if ((root.faucet.drops[i].token || "") === token) return root.faucet.drops[i]
+        return null
+    }
+    function nativeOf(id) {
+        for (var i = 0; i < root.accounts.length; i++) if (root.accounts[i].account === id) return root.accounts[i].native
+        return null
+    }
+    // Whether any account holds `symbol`, as a balance or as collateral.
+    function holds(symbol) {
+        var id = tokenId(symbol)
+        if (id === "") return false
+        for (var i = 0; i < root.accounts.length; i++) {
+            var b = tokenBalance(root.accounts[i].account, id)
+            if (b !== null && !Units.isZero(String(b))) return true
+        }
+        return root.openPositions.some(function(o) { return o.market.collateral_asset === id && !Units.isZero(o.position.collateral) })
+    }
+    // Whether the Private account holds `symbol` (as of the last sync).
+    function privateHolds(symbol) {
+        var b = root.privateId !== "" ? tokenBalance(root.privateId, tokenId(symbol)) : null
+        return b !== null && !Units.isZero(String(b))
+    }
+    // A drop claimed within the cooldown (its next claim is still ahead).
+    function claimedLately(token) {
+        var d = dropOf(token)
+        return !!d && d.next_ms !== null && d.next_ms > root.now
+    }
+    // "Next one at 14:05" while a drop waits for its cooldown, else "".
+    function claimWait(symbol) {
+        var d = dropOf(tokenId(symbol))
+        if (!d || d.next_ms === null || d.next_ms <= root.now) return ""
+        var at = new Date(d.next_ms), time = at.toLocaleTimeString(Qt.locale("en_GB"), "HH:mm")
+        return at.toDateString() === new Date(root.now).toDateString() ? qsTr("Claimed. The next one is ready at %1.").arg(time)
+                                                                       : qsTr("Claimed. The next one is ready tomorrow at %1.").arg(time)
+    }
+    // Private claims cost nothing: only the cooldown and one claim at a time stop a click.
+    function canClaim(symbol) {
+        var id = tokenId(symbol), d = dropOf(id)
+        return root.online && root.privateId !== "" && !!d && !root.claiming[id] && (d.next_ms === null || d.next_ms <= root.now)
+    }
+    // The market lending USDC against `collSym`, "" if none.
+    function marketFor(collSym) {
+        var id = tokenId(collSym)
+        for (var i = 0; i < root.markets.length; i++) if (root.markets[i].collateral_asset === id) return root.markets[i].market
+        return ""
+    }
+
+    // Start invisible: everything below the surface, no LEZ needed (private txs are fee-exempt).
+    // The path: WBTC lands privately → borrow USDC against it → save USDC (claimed meanwhile).
+    readonly property var checklist: {
+        var mine = root.openPositions.filter(function(o) { return Units.isPrivate(o.account) })
+        var wbtc = tokenId("WBTC")
+        return [
+            { key: "starter", done: root.privateHolds("WBTC") || root.claimedLately(wbtc) || mine.some(function(o) { return o.market.collateral_asset === wbtc && !Units.isZero(o.position.collateral) }) },
+            { key: "borrow", done: mine.some(function(o) { return !Units.isZero(o.position.debt || "0") }) },
+            { key: "save", done: mine.some(function(o) { return !Units.isZero(o.position.supplied_assets || "0") }) }
+        ]
+    }
+    readonly property int checklistDone: root.checklist.filter(function(s) { return s.done }).length
+    readonly property bool onboarding: root.faucet !== null && (root.checklistDone < root.checklist.length || !root.uiState.tourDone)
+
+    function setClaiming(key, on) { var c = Object.assign({}, root.claiming); if (on) c[key] = true; else delete c[key]; root.claiming = c }
+
+    // The starter: WBTC, claimed by the private account into itself (one proof), from the moment
+    // a new wallet exists; also the bar's button if it's missing. `starterStarted`: when, for the
+    // arriving screen's clock.
+    property var starterQueue: []
+    property real starterStarted: 0
+    property bool starterFailed: false     // the last starter claim didn't land
+    readonly property bool starterRunning: root.starterQueue.length > 0
+    function startStarter() {
+        if (root.starterRunning) return
+        var missing = ["WBTC"].filter(function(s) { return tokenId(s) !== "" && !root.privateHolds(s) && !root.claimedLately(tokenId(s)) })
+        if (missing.length === 0) return
+        root.starterQueue = missing
+        root.starterStarted = Date.now()
+        root.starterFailed = false
+        nextStarter()
+    }
+    function nextStarter() {
+        if (root.starterQueue.length === 0) return
+        var symbol = root.starterQueue[0]
+        claimToken(symbol, function(ok) {
+            root.starterQueue = ok ? root.starterQueue.slice(1) : []
+            if (!ok) root.starterFailed = true
+            if (ok && root.starterQueue.length === 0 && root.screen === "main") notify(qsTr("Your WBTC arrived"), qsTr("In your Private account, out of sight"))
+            nextStarter()
+        })
+    }
+
+    // A token drop, claimed by the private account into itself: a private tx, so no fee and
+    // nothing public says who got it. `then(ok)` after it lands or fails.
+    function claimToken(symbol, then) {
+        var id = tokenId(symbol)
+        if (id === "" || root.claiming[id] || root.privateId === "") { if (then) then(false); return }
+        setClaiming(id, true)
+        var d = dropOf(id)
+        var what = d ? Units.format(d.amount, tokenDecimals(id), 4) + " " + symbol : symbol
+        call("faucet_claim", { claimer: root.privateId, to: root.privateId, token: id }, function(r) {
+            setClaiming(id, false)
+            if (!then) notify(qsTr("Got %1").arg(what), qsTr("In your Private account"))
+            refreshAll()
+            if (then) then(true)
+        }, function(e) {
+            setClaiming(id, false)
+            if (e.code !== "faucet_cooldown") report(e)
+            refreshAll()
+            if (then) then(e.code === "faucet_cooldown")
+        })
+    }
+
+    // ---- the guide: the first steps on the real screens ---------------------------------------
+
+    // The next-step bar's "Show me" starts it: `coachGoal` "borrow" (all the private WBTC as
+    // collateral, then a borrow at health ≈ `healthTarget`) or "save" (the faucet's USDC, in
+    // USDC/WETH); "" when off. Its step follows from what's on screen (tab, market, account, op,
+    // amount), so wandering off only changes the hint. The user makes every click; the card's
+    // button only types an amount in.
+    property string coachGoal: ""
+    readonly property real healthTarget: 2.3
+    // How far WBTC can fall before any is sold, at the suggested borrow.
+    readonly property int fallPct: Math.round((1 - 1 / root.healthTarget) * 100)
+
+    // The private position in a market (slot 0), or null.
+    function privatePosition(mk) {
+        for (var i = 0; i < root.openPositions.length; i++) {
+            var o = root.openPositions[i]
+            if (o.account === root.privateId && o.market.market === mk && !o.position.held) return o.position
+        }
+        return null
+    }
+    // How much USDC to suggest borrowing against the private WBTC (held or already collateral):
+    // what keeps health near `healthTarget`, rounded down to 100 USDC. "0" without a price.
+    function suggestedBorrow() {
+        var mk = marketFor("WBTC"), m = marketById(mk), d = root.marketDetails[mk], pos = privatePosition(mk)
+        var held = root.privateId !== "" ? tokenBalance(root.privateId, tokenId("WBTC")) : null
+        if (!m || !d || !d.feed || d.feed.error || (held === null && !pos)) return "0"
+        var coll = parseFloat(held || "0") + parseFloat(pos ? pos.collateral : "0")
+        var cap = coll * parseFloat(d.feed.price) / 1e36 * parseFloat(m.lltv)
+        var unit = Math.pow(10, m.loan_decimals || 0) * 100
+        var amt = Math.floor((cap / root.healthTarget - parseFloat(pos && pos.debt ? pos.debt : "0")) / unit) * unit
+        return amt > 0 ? amt.toFixed(0) : "0"
+    }
+    // The USDC to save: the day's drop, or what the private account holds if less.
+    function suggestedSave() {
+        var id = tokenId("USDC"), d = dropOf(id), b = root.privateId !== "" ? tokenBalance(root.privateId, id) : null
+        if (!d || b === null) return "0"
+        return Units.cmp(String(b), String(d.amount)) < 0 ? String(b) : String(d.amount)
+    }
+    // Whether the private account holds a full USDC drop (what was borrowed is for spending).
+    readonly property bool hasSaveUsdc: {
+        var id = tokenId("USDC"), d = dropOf(id), b = root.privateId !== "" ? tokenBalance(root.privateId, id) : null
+        return !!d && b !== null && Units.cmp(String(b), String(d.amount)) >= 0
+    }
+    // Once borrowed, the USDC to save is claimed in the background (one proof).
+    readonly property bool wantsSaveUsdc: root.checklist[1].done && !root.checklist[2].done && !root.hasSaveUsdc
+    onWantsSaveUsdcChanged: claimForSave()
+    function claimForSave() {
+        if (!root.wantsSaveUsdc || !canClaim("USDC")) return
+        claimToken("USDC", function(ok) { if (ok) notify(qsTr("USDC to save arrived"), qsTr("In your Private account")) })
+    }
+
+    function startCoach(goal) { root.coachGoal = goal; showCoach() }
+
+    function amountOf(raw, symbol) { return Units.format(raw, tokenDecimals(tokenId(symbol)), symbol === "USDC" ? 0 : 4) + " " + symbol }
+
+    readonly property var coachStep: {
+        var goal = root.coachGoal
+        if (goal === "" || root.screen !== "main") return null
+        var borrow = goal === "borrow"
+        var collSym = borrow ? "WBTC" : "WETH", mk = marketFor(collSym), pair = "USDC · " + collSym
+        var g = borrow ? qsTr("Borrowing privately") : qsTr("Saving privately")
+        var step = function(title, body, targets, action, act) { return { goal: g, title: title, body: body, targets: targets, action: action || "", act: act || null } }
+        if (root.checklist[borrow ? 1 : 2].done) {
+            // Borrowed, with the USDC to save already in: on to saving, from here.
+            if (borrow && root.hasSaveUsdc)
+                return step(qsTr("Borrowed, out of sight"), qsTr("The USDC is in your Private account, and nobody can see who borrowed it. Some more USDC came in to save: that's next."),
+                            [], qsTr("Next: save USDC"), function() { root.startCoach("save") })
+            return step(borrow ? qsTr("Borrowed, out of sight") : qsTr("Saved, out of sight"),
+                        borrow ? qsTr("The USDC is in your Private account, and nobody can see who borrowed it. Some more USDC to save is on its way; the Wallet shows when it's in.")
+                               : qsTr("Your USDC now earns what borrowers pay, and nobody can see it's yours."),
+                        [{ name: "navWallet", label: qsTr("Back to Wallet"), side: "below" }],
+                        qsTr("Back to Wallet"), function() { root.coachGoal = ""; root.tab = 0 })
+        }
+        if (root.tab !== 1 && root.tab !== 2)
+            return step(qsTr("Open Markets"),
+                        borrow ? qsTr("Each market lends one token against another. Borrowing USDC against WBTC happens in USDC · WBTC.")
+                               : qsTr("Savers lend USDC to a market and earn what its borrowers pay. Yours goes to USDC · WETH."),
+                        [{ name: "navMarkets", label: qsTr("Click Markets"), side: "below" }])
+        if (root.tab === 1) {
+            if (marketsPage.selected !== mk)
+                return step(qsTr("Pick %1").arg(pair), qsTr("Its details open below the list."),
+                            [{ name: "marketRow-" + collSym, label: qsTr("Click this market"), side: "below" }])
+            return borrow ? step(qsTr("Borrow from here"), qsTr("You can borrow up to 80% of what your WBTC is worth. Past that line, some WBTC is sold to pay back the loan."),
+                                 [{ name: "marketBorrow", label: qsTr("Click Borrow USDC"), side: "below" }, { name: "borrowLimit", label: qsTr("The sell line"), side: "left" }])
+                          : step(qsTr("Save from here"), qsTr("What savers earn moves with how much of the market is lent out."),
+                                 [{ name: "marketSave", label: qsTr("Click Save USDC"), side: "below" }, { name: "marketRates", label: qsTr("What savers earn"), side: "above" }])
+        }
+        var P = positionPage
+        if (P.working) return null
+        if (P.marketId !== mk)
+            return step(qsTr("Switch to %1").arg(pair), qsTr("Position acts in one market at a time."),
+                        [{ name: "positionMarket", label: qsTr("Click to change market"), side: "below" }])
+        if (P.account !== root.privateId)
+            return step(qsTr("Act as Private"), borrow ? qsTr("Your WBTC is in your Private account. Acting from it, nobody can see who borrowed: your computer proves it instead.")
+                                                       : qsTr("Your USDC is in your Private account. Saved from there, the market sees new savings, not whose."),
+                        [{ name: "who-private", label: qsTr("Click Private"), side: "below" }])
+        var want = borrow ? (Units.isZero(P.coll) ? "supply_collateral" : "borrow") : "supply"
+        if (P.op.op !== want)
+            return want === "supply_collateral" ? step(qsTr("First, put up your WBTC"), qsTr("A loan needs collateral. The WBTC stays yours; the market holds it while you owe."),
+                                                       [{ name: "op-supply_collateral", label: qsTr("Click Add"), side: "below" }])
+                 : want === "borrow" ? step(qsTr("Now the loan"), qsTr("Your WBTC is in. Now borrow USDC against it."),
+                                            [{ name: "op-borrow", label: qsTr("Click Borrow"), side: "below" }])
+                 : step(qsTr("Save"), qsTr("Saving lends your USDC to borrowers."), [{ name: "op-supply", label: qsTr("Click Save"), side: "below" }])
+        if (!P.useAll && Units.isZero(P.amount)) {
+            var raw = want === "supply_collateral" ? String(tokenBalance(root.privateId, tokenId("WBTC")) || "0") : want === "borrow" ? suggestedBorrow() : suggestedSave()
+            var sym = want === "supply_collateral" ? "WBTC" : "USDC", has = !Units.isZero(raw)
+            var use = has ? qsTr("Use %1").arg(amountOf(raw, sym)) : "", fill = function() { positionPage.fill(raw) }
+            var box = [{ name: "positionAmountBox", label: qsTr("How much"), side: "right" }]
+            if (want === "supply_collateral") return step(qsTr("How much WBTC"), qsTr("All of it. More collateral means more room before any is sold."), box, use, fill)
+            if (want === "borrow") return step(qsTr("How much USDC"), has ? qsTr("We suggest %1: WBTC could fall about %2% before any is sold.").arg(amountOf(raw, "USDC")).arg(root.fallPct)
+                                                                         : qsTr("Waiting for the WBTC price…"), box, use, fill)
+            return step(qsTr("How much to save"), qsTr("The faucet's USDC. What you borrowed stays yours to spend."), box, use, fill)
+        }
+        var go = [{ name: "positionGo", label: qsTr("Click to dive"), side: "above" }]
+        if (want === "supply_collateral") return step(qsTr("Dive"), qsTr("Your computer proves it, %1. The network sees WBTC come in, not whose.").arg(root.diveTime), go)
+        if (want === "borrow") return step(qsTr("Watch the water, then dive"), qsTr("The dashed line shows where your debt would take the water; the top line is where some WBTC would be sold. Proving takes %1.").arg(root.diveTime), go)
+        return step(qsTr("Dive"), qsTr("Your computer proves it, %1. The market sees new savings, not whose.").arg(root.diveTime), go)
+    }
+    // On screen unless a dive or the tour is.
+    function showCoach() {
+        var s = root.coachStep
+        if (s && root.dive === null && !tour.visible) coach.show(s)
+        else coach.visible = false
+    }
+    onCoachStepChanged: showCoach()
+    onDiveChanged: showCoach()
+
+    function startTour() {
+        root.coachGoal = ""
+        tour.steps = Tour.steps
+        tour.start()
+    }
+
     // Markets and their details; with `portfolio`, every account's positions and balances too.
     function refreshMarkets(portfolio) {
         call("markets", {}, function(list) {
+            // With token names set, only markets whose two tokens are both named are shown.
+            if (Object.keys(root.tokenNames).length > 0)
+                list = list.filter(function(m) { return !!root.tokenNames[m.loan_asset] && !!root.tokenNames[m.collateral_asset] })
+            // With a market list set, only those (replaced markets stay on chain).
+            if (root.marketIds.length > 0)
+                list = list.filter(function(m) { return root.marketIds.indexOf(m.market) >= 0 })
             root.markets = list
             root.refreshing = false
             list.forEach(function(m) {
@@ -513,8 +881,8 @@ Item {
             anchors.fill: parent
             currentIndex: root.tab
             Pages.WalletPage { app: root; topInset: header.height }
-            Pages.MarketsPage { app: root; topInset: header.height }
-            Pages.PositionPage { app: root; topInset: header.height; active: root.tab === 2 }
+            Pages.MarketsPage { id: marketsPage; app: root; topInset: header.height }
+            Pages.PositionPage { id: positionPage; app: root; topInset: header.height; active: root.tab === 2 }
             Pages.ActivityPage { app: root; topInset: header.height }
         }
 
@@ -547,6 +915,7 @@ Item {
                     Repeater {
                         model: [qsTr("Wallet"), qsTr("Markets"), qsTr("Position"), qsTr("Activity")]
                         delegate: Rectangle {
+                            objectName: ["navWallet", "navMarkets", "navPosition", "navActivity"][index]
                             readonly property bool on: root.tab === index
                             readonly property int badge: index === 3 ? root.runningJobs.length : 0
                             height: 34
@@ -575,6 +944,8 @@ Item {
                 Layout.preferredWidth: 1
                 implicitHeight: 32
                 Rectangle {
+                    id: statusPill
+                    objectName: "statusPill"
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     height: 32
@@ -643,6 +1014,34 @@ Item {
         }
 
         Pages.DiveOverlay { anchors.fill: parent; app: root; visible: root.dive !== null; z: 5 }
+    }
+
+    Kit.TourOverlay {
+        id: tour
+        objectName: "tour"
+        anchors.fill: parent
+        z: 8
+        visible: false
+        scope: root
+        onStepShown: function(step) {
+            if (!step) return
+            if (step.setup === "position") root.openPosition(root.marketFor("WBTC") || (root.markets.length > 0 ? root.markets[0].market : ""), root.privateId || root.everydayId, "borrow")
+            root.showSellLine = step.setup === "position"
+            root.tab = step.tab
+        }
+        onFinished: function(skipped) { root.showSellLine = false; root.saveUi({ tourDone: true }); root.tab = 0 }
+    }
+
+    Kit.TourOverlay {
+        id: coach
+        objectName: "coach"
+        anchors.fill: parent
+        z: 7
+        visible: false
+        coach: true
+        scope: root
+        bottomInset: toast.shown ? toast.height + 2 * Theme.spacing.xlarge : 0
+        onFinished: function(skipped) { root.coachGoal = "" }
     }
 
     LogosToast {

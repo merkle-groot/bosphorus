@@ -34,6 +34,9 @@ struct Args {
     /// The screened pool (E10), for the `pool_*` methods.
     #[arg(long)]
     pool: Option<Holder>,
+    /// The faucet (onboarding), for the `faucet*` methods.
+    #[arg(long)]
+    faucet: Option<Holder>,
 }
 
 /// The original stdout, for the protocol; fd 1 now goes to stderr.
@@ -61,7 +64,7 @@ async fn run() -> Result<()> {
         Some(dir) => dir,
         None => PathBuf::from(std::env::var_os("LEE_WALLET_HOME_DIR").context("set --data-dir or LEE_WALLET_HOME_DIR")?).join("bosphorus-app"),
     };
-    let app = App::open(Config { wallet_home: None, lending: args.lending.id(), data_dir, scan_from: args.scan_from, pool: args.pool.map(Holder::id) }).await?;
+    let app = App::open(Config { wallet_home: None, lending: args.lending.id(), data_dir, scan_from: args.scan_from, pool: args.pool.map(Holder::id), faucet: args.faucet.map(Holder::id) }).await?;
 
     let (lines_tx, mut lines_rx) = mpsc::unbounded_channel::<Value>();
     let writer = tokio::spawn(async move {

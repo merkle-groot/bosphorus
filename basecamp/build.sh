@@ -2,6 +2,7 @@
 # Builds the Bosphorus Basecamp packages: libbosphorus_ffi with cargo (Metal proving; nixpkgs'
 # SDK has no `xcrun metal`), staged into the core module's lib/, then both portable .lgx with nix.
 #   basecamp/build.sh            → basecamp/out/{bosphorus,bosphorus_ui}.lgx
+#   FFI_FLAGS=--no-default-features basecamp/build.sh   → dev mode only (no prover, no Metal needed)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
@@ -10,7 +11,8 @@ cd "$(dirname "$0")/.."
 if TOKEN=$(gh auth token 2>/dev/null); then
   export NIX_CONFIG="access-tokens = github.com=$TOKEN"
 fi
-cargo build --release -p bosphorus-ffi
+# shellcheck disable=SC2086
+cargo build --release -p bosphorus-ffi ${FFI_FLAGS:-}
 CORE=basecamp/bosphorus-core
 mkdir -p "$CORE/lib/aarch64-darwin" basecamp/out
 cp ffi/bosphorus_ffi.h "$CORE/lib/"

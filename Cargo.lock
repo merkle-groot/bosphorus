@@ -1173,6 +1173,7 @@ dependencies = [
  "borsh",
  "bosphorus-client",
  "bosphorus-core",
+ "bosphorus-faucet",
  "bosphorus-lending",
  "bosphorus-pool",
  "bosphorus-token",
@@ -1193,6 +1194,7 @@ dependencies = [
  "borsh",
  "bosphorus-core",
  "bosphorus-disclosure",
+ "bosphorus-faucet",
  "bosphorus-lending",
  "bosphorus-methods",
  "bosphorus-oracle",
@@ -1241,6 +1243,25 @@ dependencies = [
  "bosphorus-lending",
  "lee_core",
  "risc0-zkvm",
+]
+
+[[package]]
+name = "bosphorus-faucet"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "bosphorus-token",
+ "lee_core",
+ "risc0-zkvm",
+]
+
+[[package]]
+name = "bosphorus-faucet-guest"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "bosphorus-faucet",
+ "lee_core",
 ]
 
 [[package]]
@@ -1297,6 +1318,7 @@ dependencies = [
  "borsh",
  "bosphorus-core",
  "bosphorus-disclosure",
+ "bosphorus-faucet",
  "bosphorus-lending",
  "bosphorus-oracle",
  "bosphorus-pool",

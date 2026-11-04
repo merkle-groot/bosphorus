@@ -351,6 +351,8 @@ pub struct Sent {
 pub enum Refusal {
     /// Findings F7.
     PayerCannotFund { payer: AccountId, balance: u128, reserve: u128 },
+    /// The faucet's cooldown for this claimer and asset runs until `next_ms`.
+    FaucetCooldown { asset: AccountId, next_ms: u64 },
 }
 
 impl std::fmt::Display for Refusal {
@@ -359,6 +361,7 @@ impl std::fmt::Display for Refusal {
             Self::PayerCannotFund { payer, balance, reserve } => {
                 write!(f, "payer {payer} holds {balance} native, below the sequencer's fee reserve {reserve}")
             }
+            Self::FaucetCooldown { asset, next_ms } => write!(f, "already claimed {asset}: next claim at {next_ms} ms"),
         }
     }
 }
@@ -568,10 +571,15 @@ impl Client {
     /// Findings F7: the sequencer refuses a tx whose payer can't cover its fee reserve, with an
     /// opaque error. Checks the execution part (`gas_limit × base_fee_exec`) and returns the
     /// payer's balance.
+    /// The native a payer must hold to send a public tx: `gas_limit × base_fee_exec`.
+    pub async fn fee_reserve(&self) -> Result<u128> {
+        let fees = self.wallet.client_owned().get_fee_state().await?;
+        Ok(u128::from(self.wallet.config().gas_limit) * u128::from(fees.base_fee_exec))
+    }
+
     pub(crate) async fn check_payer(&self, payer: AccountId) -> Result<u128> {
         let balance = self.native_balance(payer).await?;
-        let fees = self.wallet.client_owned().get_fee_state().await?;
-        let reserve = u128::from(self.wallet.config().gas_limit) * u128::from(fees.base_fee_exec);
+        let reserve = self.fee_reserve().await?;
         if balance < reserve {
             return Err(anyhow::Error::new(Refusal::PayerCannotFund { payer, balance, reserve }));
         }

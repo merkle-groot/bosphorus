@@ -7,6 +7,7 @@
 //! inclusion block and its timestamp, and the fee when the payer is known.
 
 pub mod disclosure;
+pub mod faucet;
 pub mod funds;
 pub mod lending;
 pub mod pool;
@@ -27,13 +28,18 @@ use wallet::{
     AccDecodeData, AccountIdentity, AccountMention, WalletCore, program_facades::program_loader::ProgramLoader,
 };
 
-pub use bosphorus_methods::{LENDING_ELF, ORACLE_ELF, POOL_ELF, TOKEN_ELF};
+pub use bosphorus_methods::{FAUCET_ELF, LENDING_ELF, ORACLE_ELF, POOL_ELF, TOKEN_ELF};
 pub use bosphorus_oracle::{Feed, U256};
 pub use bosphorus_token::Config as TokenConfig;
 
 /// Oracle publishes are stamped this far back, so a sequencer clock slightly behind ours still
 /// accepts the window (lending ops do the same with `ClaimConfig::lag_ms`).
 pub const PUBLISH_LAG_MS: u64 = 2_000;
+
+/// The gas limit of the app's wallets. A payer must hold `gas_limit × base_fee` (4M at fee 8)
+/// to send; the costliest user op measured ~165k gas (constraints §5). Deploys use `bos` and
+/// LEZ's default.
+pub const APP_GAS_LIMIT: u64 = 500_000;
 
 /// The sequencer answered a tx with an error: it refused it, so it can't land.
 #[derive(Debug)]
@@ -126,7 +132,14 @@ impl Client {
     /// environment: for library hosts, where setting `LEE_WALLET_HOME_DIR` would race other threads.
     pub fn open(home: &std::path::Path) -> Result<Self> {
         proving::install();
-        Ok(Self { wallet: WalletCore::new_update_chain(home.join("wallet_config.json"), home.join("storage.json"), None)? })
+        let config_path = home.join("wallet_config.json");
+        // A wallet whose config sets no gas limit gets the app's, not LEZ's 2M (a 16M reserve).
+        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path)?)?;
+        let overrides = config.get("gas_limit").is_none().then(|| wallet::config::WalletConfigOverrides {
+            gas_limit: Some(APP_GAS_LIMIT),
+            ..Default::default()
+        });
+        Ok(Self { wallet: WalletCore::new_update_chain(config_path, home.join("storage.json"), overrides)? })
     }
 
     /// `label` names the op in the `[measure]` line.

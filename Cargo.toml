@@ -17,6 +17,8 @@ members = [
     "programs/lending/guest",
     "programs/pool/core",
     "programs/pool/guest",
+    "programs/faucet/core",
+    "programs/faucet/guest",
     "programs/disclosure",
     "programs/test-caller",
     "programs/methods",
@@ -56,6 +58,7 @@ bosphorus-token = { path = "programs/token/core" }
 bosphorus-oracle = { path = "programs/oracle/core" }
 bosphorus-lending = { path = "programs/lending/core" }
 bosphorus-pool = { path = "programs/pool/core" }
+bosphorus-faucet = { path = "programs/faucet/core" }
 bosphorus-methods = { path = "programs/methods" }
 spike-methods = { path = "spikes/methods" }
 bosphorus-prover = { path = "prover" }

@@ -25,6 +25,9 @@ enum Command {
     Token(Token),
     #[command(subcommand)]
     Oracle(Oracle),
+    /// Test tokens and gas for newcomers.
+    #[command(subcommand)]
+    Faucet(Faucet),
     /// Deploy and administer the lending program.
     #[command(subcommand)]
     Lending(lending::Admin),
@@ -135,6 +138,57 @@ enum Token {
 }
 
 #[derive(Subcommand)]
+enum Faucet {
+    /// Upload the faucet program. Prints its id.
+    Deploy {
+        #[arg(long)]
+        payer: Holder,
+    },
+    /// Set the drops (`ASSET=AMOUNT`, `native` for gas) and the cooldown. Once.
+    Init {
+        #[arg(long)]
+        faucet: Holder,
+        #[arg(long, required = true, num_args = 1..)]
+        drop: Vec<String>,
+        #[arg(long, default_value_t = 86_400)]
+        cooldown_secs: u64,
+        #[arg(long)]
+        payer: Holder,
+    },
+    /// Prints the `mint_authority` to give a token this faucet drops, and the gas custody account.
+    Accounts {
+        #[arg(long)]
+        faucet: Holder,
+    },
+    /// Claim `asset`'s drop (`native` for gas) for `claimer`, paid to `to` (default: the claimer).
+    Claim {
+        #[arg(long)]
+        faucet: Holder,
+        #[arg(long)]
+        asset: String,
+        #[arg(long)]
+        claimer: Holder,
+        #[arg(long)]
+        to: Option<Holder>,
+        /// Fee payer of a public claim (default: the claimer).
+        #[arg(long)]
+        payer: Option<Holder>,
+    },
+    Info {
+        #[arg(long)]
+        faucet: Holder,
+    },
+}
+
+/// A faucet asset: `native`, or a token's `Public/<id>`.
+fn faucet_asset(s: &str) -> Result<lee::AccountId> {
+    if s == "native" {
+        return Ok(lee_core::native_token::NATIVE_TOKEN_PROGRAM_ID);
+    }
+    Ok(s.parse::<Holder>()?.id())
+}
+
+#[derive(Subcommand)]
 enum Oracle {
     /// Upload the oracle program. Prints its id.
     Deploy {
@@ -193,7 +247,7 @@ async fn run(command: Command) -> Result<()> {
     }
     if let Command::Programs { write_dir } = &command {
         // No wallet needed.
-        for (name, elf) in [("token", TOKEN_ELF), ("oracle", ORACLE_ELF), ("lending", LENDING_ELF), ("pool", bosphorus_client::POOL_ELF), ("disclosure", bosphorus_client::disclosure::DISCLOSURE_ELF)] {
+        for (name, elf) in [("token", TOKEN_ELF), ("oracle", ORACLE_ELF), ("lending", LENDING_ELF), ("pool", bosphorus_client::POOL_ELF), ("faucet", bosphorus_client::FAUCET_ELF), ("disclosure", bosphorus_client::disclosure::DISCLOSURE_ELF)] {
             println!("{name} {} {} bytes", bosphorus_client::hex_id(&bosphorus_client::image_id(elf)?), elf.len());
             if let Some(dir) = write_dir {
                 std::fs::create_dir_all(dir)?;
@@ -246,6 +300,36 @@ async fn run(command: Command) -> Result<()> {
                 let feed = bosphorus_client::feed_id(id(oracle), id(publisher), &name);
                 println!("{:?}", client.feed(feed, id(oracle)).await?);
             }
+        },
+        Command::Faucet(cmd) => match cmd {
+            Faucet::Deploy { payer } => println!("{}", Holder::Public(client.deploy(bosphorus_client::FAUCET_ELF, payer.id()).await?)),
+            Faucet::Init { faucet, drop, cooldown_secs, payer } => {
+                let drops = drop
+                    .iter()
+                    .map(|d| {
+                        let (asset, amount) = d.split_once('=').with_context(|| format!("expected ASSET=AMOUNT, got {d}"))?;
+                        Ok(bosphorus_faucet::Drop { asset: faucet_asset(asset)?, amount: amount.parse()? })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                client.faucet_init(faucet.id(), drops, cooldown_secs * 1000, payer.id()).await?;
+                println!("{:?}", client.faucet_config(faucet.id()).await?);
+            }
+            Faucet::Accounts { faucet } => {
+                println!("mint_authority {}", Holder::Public(bosphorus_faucet::mint_authority(&faucet.id())));
+                println!("custody {}", Holder::Public(bosphorus_faucet::custody_id(&faucet.id())));
+            }
+            Faucet::Claim { faucet, asset, claimer, to, payer: p } => {
+                let asset = faucet_asset(&asset)?;
+                let to = to.unwrap_or(claimer);
+                client.faucet_claim(faucet.id(), asset, claimer, to, payer(p)).await?;
+                let balance = if bosphorus_faucet::is_native(&asset) {
+                    client.native_balance(to.id()).await?
+                } else {
+                    client.token_balance(asset, to).await?
+                };
+                println!("{balance}");
+            }
+            Faucet::Info { faucet } => println!("{:?}", client.faucet_config(faucet.id()).await?),
         },
         Command::Lending(lending::Admin::Deploy { payer }) => {
             println!("{}", Holder::Public(client.deploy(LENDING_ELF, payer.id()).await?));

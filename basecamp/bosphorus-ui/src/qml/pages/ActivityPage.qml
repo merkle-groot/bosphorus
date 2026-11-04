@@ -120,6 +120,7 @@ Item {
 
             // The list.
             ColumnLayout {
+                objectName: "activityList"
                 Layout.preferredWidth: 400
                 Layout.maximumWidth: 400
                 Layout.minimumWidth: 290
@@ -274,7 +275,13 @@ Item {
                                     Layout.fillWidth: true
                                     spacing: 14
                                     LogosText { Layout.preferredWidth: 70; text: modelData[0]; font.family: Theme.typography.mono; font.pixelSize: 12; color: Tide.text4 }
-                                    LogosText { Layout.fillWidth: true; text: modelData[1]; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere; font.family: Theme.typography.mono; font.pixelSize: 12; color: "#D9FFFFFF" }
+                                    // Selectable, so a hash can be copied by hand too.
+                                    TextEdit { Layout.fillWidth: true; text: modelData[1]; readOnly: true; selectByMouse: true; textFormat: TextEdit.PlainText; wrapMode: TextEdit.WrapAnywhere; font.family: Theme.typography.mono; font.pixelSize: 12; color: "#D9FFFFFF"; selectionColor: "#5967DCCB"; selectedTextColor: "#FFFFFF" }
+                                    LogosText {
+                                        visible: modelData[0] === "tx" && !!page.cur.tx
+                                        text: qsTr("Copy"); font.pixelSize: 12; font.underline: true; color: Tide.text4
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.app.copy(page.cur.tx) }
+                                    }
                                 }
                             }
                         }
@@ -285,6 +292,7 @@ Item {
 
         // The seabed.
         Rectangle {
+            objectName: "seabed"
             Layout.fillWidth: true
             implicitHeight: seabed.implicitHeight + 46
             color: page.sea

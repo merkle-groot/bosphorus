@@ -169,6 +169,7 @@ impl ApiError {
             } else {
                 cause.downcast_ref::<Refusal>().map(|r| match r {
                     Refusal::PayerCannotFund { .. } => "payer_cannot_fund".to_string(),
+                    Refusal::FaucetCooldown { .. } => "faucet_cooldown".to_string(),
                 })
             }
         });
@@ -257,6 +258,8 @@ pub struct Config {
     pub scan_from: u64,
     /// The screened pool (E10), if any: `pool_*` methods answer `no_pool` without one.
     pub pool: Option<AccountId>,
+    /// The faucet (onboarding), if any: `faucet*` methods answer `no_faucet` without one.
+    pub faucet: Option<AccountId>,
 }
 
 /// Markets found so far, saved so a restart doesn't rescan the chain.
@@ -506,6 +509,50 @@ impl App {
                 let Holder::Private(id) = holder(&p.holder)? else { return Err(coded("bad_request", "holder: lots sit on a private account")) };
                 let label = parse_label(&p.label).map_err(|e| coded("bad_request", format!("label: {e:#}")))?;
                 self.move_funds(Move::PoolRagequit { pool, holder: id, label }).await
+            }
+            "faucet" => {
+                #[derive(Deserialize)]
+                struct P {
+                    #[serde(default)]
+                    claimer: Option<String>,
+                    #[serde(default)]
+                    gas_claimer: Option<String>,
+                }
+                let p: P = params(p)?;
+                let claimer = p.claimer.as_deref().map(holder).transpose()?;
+                let gas_claimer = p.gas_claimer.as_deref().map(holder).transpose()?;
+                self.faucet(claimer, gas_claimer).await
+            }
+            "faucet_claim" => {
+                #[derive(Deserialize)]
+                struct P {
+                    claimer: String,
+                    to: String,
+                    // A token program (`Public/<id>`); native LEZ (gas) if absent.
+                    #[serde(default)]
+                    token: Option<String>,
+                }
+                let p: P = params(p)?;
+                let faucet = self.faucet_id()?;
+                let asset = token(p.token.as_deref())?;
+                self.move_funds(Move::FaucetClaim { faucet, asset, claimer: holder(&p.claimer)?, to: holder(&p.to)? }).await
+            }
+            // The view's own state (onboarding progress), kept with the jobs: `{"set"?: {...}}` replaces
+            // it; answers the state.
+            "ui_state" => {
+                #[derive(Deserialize)]
+                struct P {
+                    #[serde(default)]
+                    set: Option<Value>,
+                }
+                let p: P = params(p)?;
+                let path = self.inner.config.data_dir.join("ui.json");
+                if let Some(state) = p.set {
+                    ensure!(state.is_object(), coded("bad_request", "set: a JSON object"));
+                    fs::write(&path, serde_json::to_vec(&state)?).with_context(|| format!("writing {}", path.display()))?;
+                    return Ok(state);
+                }
+                Ok(fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| json!({})))
             }
             "sync" => self.sync().await,
             "quote" => self.quote(params(p)?).await,
@@ -770,6 +817,43 @@ impl App {
         }
     }
 
+    // ---- the faucet (onboarding) ----------------------------------------------------------
+
+    fn faucet_id(&self) -> Result<AccountId> {
+        self.inner.config.faucet.ok_or_else(|| coded("no_faucet", "no faucet is configured"))
+    }
+
+    /// The faucet's drops, and when each can next be claimed: `{"faucet", "cooldown_ms", "now_ms",
+    /// "fee_reserve", "drops": [{"token", "amount", "next_ms"}]}`. `token` is null for gas (native
+    /// LEZ); `next_ms` is for `gas_claimer` (gas) or `claimer` (tokens), null without one, 0 when
+    /// claimable now. `fee_reserve` is the native a public account needs to send anything.
+    async fn faucet(&self, claimer: Option<Holder>, gas_claimer: Option<Holder>) -> Result<Value> {
+        let faucet = self.faucet_id()?;
+        let client = self.inner.client.read().await;
+        let config = client.faucet_config(faucet).await?;
+        let mut drops = vec![];
+        for drop in &config.drops {
+            let native = drop.asset == NATIVE_TOKEN_PROGRAM_ID;
+            let next = match if native { gas_claimer } else { claimer } {
+                Some(who) => Some(client.faucet_record(faucet, who).await?.next_claim(&drop.asset, config.cooldown_ms)),
+                None => None,
+            };
+            drops.push(json!({
+                "token": (!native).then(|| public(drop.asset)),
+                "amount": drop.amount.to_string(),
+                "next_ms": next,
+            }));
+        }
+        let reserve = client.fee_reserve().await?;
+        Ok(json!({
+            "faucet": public(faucet),
+            "cooldown_ms": config.cooldown_ms,
+            "now_ms": bosphorus_client::now_ms()?,
+            "fee_reserve": reserve.to_string(),
+            "drops": drops,
+        }))
+    }
+
     // ---- the screened pool (E10) ----------------------------------------------------------
 
     fn pool_id(&self) -> Result<AccountId> {
@@ -877,6 +961,7 @@ enum Move {
     PoolDeposit { pool: AccountId, asset: AccountId, from: Holder, to: Holder, amount: u128 },
     PoolWithdraw { pool: AccountId, asset: AccountId, holder: AccountId, to: Holder, amount: u128 },
     PoolRagequit { pool: AccountId, holder: AccountId, label: Label },
+    FaucetClaim { faucet: AccountId, asset: AccountId, claimer: Holder, to: Holder },
 }
 
 impl Move {
@@ -886,6 +971,7 @@ impl Move {
             Self::PoolDeposit { .. } => "pool deposit",
             Self::PoolWithdraw { .. } => "pool withdrawal",
             Self::PoolRagequit { .. } => "ragequit",
+            Self::FaucetClaim { .. } => "faucet claim",
         }
     }
 
@@ -922,6 +1008,14 @@ impl Move {
                 }
             }
             Self::PoolRagequit { .. } => {}
+            // The client checks the cooldown (`faucet_cooldown`) and, for a public claimer, the fee reserve.
+            Self::FaucetClaim { claimer, to, .. } => {
+                if let (Holder::Private(_), Holder::Private(_)) = (claimer, to)
+                    && claimer != to
+                {
+                    return Err(coded("bad_request", "to: a private claim pays a public account or the claimer itself"));
+                }
+            }
         }
         Ok(())
     }
@@ -935,6 +1029,7 @@ impl Move {
             }
             Self::PoolWithdraw { pool, asset, holder, to, amount } => Ok((client.send_pool_withdraw(pool, asset, holder, amount, to).await?, None)),
             Self::PoolRagequit { pool, holder, label } => Ok((client.send_pool_ragequit(pool, holder, label).await?, None)),
+            Self::FaucetClaim { faucet, asset, claimer, to } => Ok((client.send_faucet_claim(faucet, asset, claimer, to, None).await?, None)),
         }
     }
 }

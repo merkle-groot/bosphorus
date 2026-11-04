@@ -165,6 +165,7 @@ Item {
                                     }
                                 }
                             }
+                            Item { anchors.fill: parent; objectName: "marketRow-" + mrow.i.coll }   // for the guide: the row of one market
                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.app.openMarket = mrow.m.market }
                         }
                     }
@@ -222,6 +223,7 @@ Item {
                             }
                         }
                         GridLayout {
+                            objectName: "marketRates"
                             Layout.fillWidth: true
                             columns: 2
                             columnSpacing: 12
@@ -294,6 +296,7 @@ Item {
                         Layout.alignment: Qt.AlignTop
                         spacing: 16
                         ColumnLayout {
+                            objectName: "borrowLimit"
                             Layout.fillWidth: true
                             spacing: 8
                             readonly property real lltv: page.cur ? parseFloat(page.cur.lltv) || 0 : 0
@@ -326,6 +329,7 @@ Item {
                         }
                         // The price.
                         Rectangle {
+                            objectName: "marketPrice"
                             readonly property bool stale: page.c !== null && page.c.stale
                             Layout.fillWidth: true
                             implicitHeight: priceCol.implicitHeight + 28
@@ -359,12 +363,13 @@ Item {
                             }
                         }
                         GridLayout {
+                            objectName: "marketActions"
                             visible: page.c !== null && !page.c.off
                             Layout.fillWidth: true
                             columns: 2
                             columnSpacing: 10
-                            Kit.BigButton { Layout.fillWidth: true; Layout.preferredWidth: 1; buttonHeight: 52; outline: true; text: page.c ? qsTr("Save %1").arg(page.c.loan) : ""; onClicked: page.app.openPosition(page.selected, "", "supply") }
-                            Kit.BigButton { Layout.fillWidth: true; Layout.preferredWidth: 1; buttonHeight: 52; text: page.c ? qsTr("Borrow %1").arg(page.c.loan) : ""; onClicked: page.app.openPosition(page.selected, "", "borrow") }
+                            Kit.BigButton { objectName: "marketSave"; Layout.fillWidth: true; Layout.preferredWidth: 1; buttonHeight: 52; outline: true; text: page.c ? qsTr("Save %1").arg(page.c.loan) : ""; onClicked: page.app.openPosition(page.selected, "", "supply") }
+                            Kit.BigButton { objectName: "marketBorrow"; Layout.fillWidth: true; Layout.preferredWidth: 1; buttonHeight: 52; text: page.c ? qsTr("Borrow %1").arg(page.c.loan) : ""; onClicked: page.app.openPosition(page.selected, "", "borrow") }
                         }
                         LogosText {
                             text: page.details ? qsTr("Hide technical details") : qsTr("Technical details")
@@ -387,7 +392,16 @@ Item {
                                     Layout.fillWidth: true
                                     implicitHeight: Math.max(k.implicitHeight, v.implicitHeight)
                                     LogosText { id: k; width: 80; text: modelData[0]; font.family: Theme.typography.mono; font.pixelSize: 11; color: "#99FFFFFF" }
-                                    LogosText { id: v; x: 88; width: parent.width - 88; text: modelData[1]; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere; font.family: Theme.typography.mono; font.pixelSize: 11; color: "#D9FFFFFF" }
+                                    // Selectable; ids also get a Copy link.
+                                    readonly property bool isId: ["market", "loan", "collateral"].indexOf(modelData[0]) >= 0 && !!modelData[1]
+                                    TextEdit { id: v; x: 88; width: parent.width - 88 - (cp.visible ? cp.implicitWidth + 10 : 0); text: modelData[1]; readOnly: true; selectByMouse: true; textFormat: TextEdit.PlainText; wrapMode: TextEdit.WrapAnywhere; font.family: Theme.typography.mono; font.pixelSize: 11; color: "#D9FFFFFF"; selectionColor: "#5967DCCB"; selectedTextColor: "#FFFFFF" }
+                                    LogosText {
+                                        id: cp
+                                        visible: parent.isId
+                                        anchors.right: parent.right
+                                        text: qsTr("Copy"); font.pixelSize: 11; font.underline: true; color: "#99FFFFFF"
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.app.copy(modelData[1]) }
+                                    }
                                 }
                             }
                         }

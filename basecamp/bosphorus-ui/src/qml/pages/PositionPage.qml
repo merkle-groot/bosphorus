@@ -123,7 +123,8 @@ Item {
     readonly property real sellAt: height > 0 ? Math.min(0.8, 1 - (topInset + opRow.y + opRow.height + 48) / height) : 0.8
     readonly property real level: spills ? sellAt + 0.03 : Tide.level(ratioShown, sellAt)
     readonly property real hfShown: spills ? 0.5 : (problem ? hfNow : hfAfter)
-    readonly property bool showLine: parseFloat(debt) > 0 || parseFloat(after.debt) > 0 || spills
+    // The tour shows it on an empty position too.
+    readonly property bool showLine: parseFloat(debt) > 0 || parseFloat(after.debt) > 0 || spills || !!app.showSellLine
     // The water as the position stands, and whether to preview where the op takes it.
     readonly property real levelNow: {
         var cap = capacity(coll), d = parseFloat(debt)
@@ -347,6 +348,8 @@ Item {
         }
         function onPrefillChanged() { if (page.app.prefill.amount) amountInput.text = page.app.prefill.amount }
     }
+    // The guide's "Use …" button: an amount in base units, typed in for the user.
+    function fill(raw) { page.useAll = false; amountInput.text = Units.exact(raw, page.decimals) }
 
     // ---- the strait -------------------------------------------------------------------
 
@@ -357,7 +360,7 @@ Item {
         settleMs: 1400
         overshoot: 0.9
     }
-    Kit.SellLine { at: page.sellAt; visible: page.showLine; label: qsTr("If the water reaches here, some %1 is sold").arg(page.collSym) }
+    Kit.SellLine { objectName: "sellLine"; at: page.sellAt; visible: page.showLine; label: qsTr("If the water reaches here, some %1 is sold").arg(page.collSym) }
 
     // The rise the op would add, shaded from the water up to the preview line: red when it
     // crosses the sell line.
@@ -413,11 +416,13 @@ Item {
             Layout.rightMargin: 28
             spacing: 10
             Flow {
+                objectName: "positionWho"
                 Layout.fillWidth: true
                 spacing: 6
                 Repeater {
                     model: page.app.accounts
                     delegate: Kit.Pill {
+                        objectName: Units.isPrivate(modelData.account) ? "who-private" : "who-public"
                         text: page.app.accountName(modelData.account)
                         on: page.account === modelData.account
                         onClicked: { page.app.actAs = modelData.account; page.app.slot = 0; page.useAll = false; page.from = ""; page.to = ""; page.payer = "" }
@@ -436,6 +441,7 @@ Item {
                     }
                 }
                 Kit.Pill {
+                    objectName: "positionMarket"
                     visible: page.app.markets.length > 1
                     text: page.loanSym + " · " + page.collSym + " ▾"
                     onClicked: {
@@ -471,6 +477,7 @@ Item {
         // The op: Tide.ops in pairs (in, out), one labelled capsule per pair.
         Flow {
             id: opRow
+            objectName: "positionOps"
             Layout.alignment: Qt.AlignHCenter
             Layout.topMargin: 16
             spacing: 14
@@ -501,6 +508,7 @@ Item {
                             model: 2
                             delegate: Kit.Pill {
                                 readonly property int op: group.first + index
+                                objectName: "op-" + Tide.ops[op].op
                                 pillHeight: 34
                                 text: Tide.ops[op].short || Tide.ops[op].label
                                 offColor: "transparent"
@@ -519,6 +527,7 @@ Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
         ColumnLayout {
+            objectName: "positionAmountBox"
             anchors.centerIn: parent
             spacing: 6
             RowLayout {
@@ -605,7 +614,7 @@ Item {
                             if (a.debt !== page.debt) q.push(qsTr("You owe %1 → %2 %3").arg(Units.format(page.debt, page.loanDec, 2)).arg(Units.format(a.debt, page.loanDec, 2)).arg(page.loanSym))
                             if (parseFloat(a.debt) > 0 && parseFloat(a.coll) > 0 && page.lltv > 0) {
                                 var liq = (parseFloat(a.debt) / Math.pow(10, page.loanDec)) / ((parseFloat(a.coll) / Math.pow(10, page.collDec)) * page.lltv)
-                                q.push(qsTr("The water only reaches the line if %1 falls below %2 %3 (now %4).").arg(page.collSym).arg(liq.toPrecision(4)).arg(page.loanSym).arg(page.feed ? Units.price(page.feed.price, page.loanDec, page.collDec) : "–"))
+                                q.push(qsTr("The water only reaches the line if %1 falls below %2 %3 (now %4).").arg(page.collSym).arg(Number(liq.toPrecision(4)).toLocaleString(Qt.locale("en_US"), "f", liq >= 100 ? 0 : 2)).arg(page.loanSym).arg(page.feed ? Units.price(page.feed.price, page.loanDec, page.collDec) : "–"))
                             }
                             return q
                         }

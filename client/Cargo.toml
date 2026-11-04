@@ -16,6 +16,7 @@ bosphorus-token.workspace = true
 bosphorus-oracle.workspace = true
 bosphorus-lending.workspace = true
 bosphorus-pool.workspace = true
+bosphorus-faucet.workspace = true
 bosphorus-disclosure.workspace = true
 risc0-zkvm.workspace = true
 bincode = "1.3"

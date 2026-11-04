@@ -18,7 +18,7 @@ case $NETWORK in
     ;;
   *) echo "NETWORK must be localnet or testnet, got $NETWORK" >&2; exit 1 ;;
 esac
-STATE=$PWD/.$NETWORK
+STATE=${STATE:-$PWD/.$NETWORK}
 export LEE_WALLET_HOME_DIR=${LEE_WALLET_HOME_DIR:-$STATE/phase5-wallet}
 export SUPPRESS_VERBOSE_PRINTS=1
 DEPLOY_ENV=$STATE/deploy.env
@@ -37,7 +37,8 @@ more() { [[ "$1" -gt "$2" ]] || { echo "FAIL: $3: expected more than $2, got $1"
 bos() {
   local err rc=0
   err=$(mktemp)
-  "$BOS_BIN" "$@" 2> "$err" | tail -1 || rc=$?
+  # bos's own exit code, not tail's: a failed step must stop the script (one that didn't cost 16M).
+  "$BOS_BIN" "$@" 2> "$err" | tail -1; rc=${PIPESTATUS[0]}
   grep '^\[measure\]' "$err" | sed "s/^/$(date +%s) /" >> "$MEASURE" || true
   grep -v '^\[measure\]' "$err" >&2 || true
   rm -f "$err"

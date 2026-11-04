@@ -13,6 +13,8 @@ Window {
     // PROBE_SCREEN: "main" (an open wallet, default), "setup" (no wallet), "phrase".
     readonly property string mode: Qt.application.arguments.indexOf("setup") >= 0 ? "setup" : "main"
     readonly property bool stale: Qt.application.arguments.indexOf("stale") >= 0
+    // "onboard": a fresh wallet with a faucet: Get started, the claims, every tour step.
+    readonly property bool onboard: Qt.application.arguments.indexOf("onboard") >= 0
     // "offline": the sequencer can't be reached. "short": Basecamp's window height (720).
     readonly property bool offline: Qt.application.arguments.indexOf("offline") >= 0
     height: Qt.application.arguments.indexOf("short") >= 0 ? 720 : 820
@@ -29,12 +31,12 @@ Window {
         property int next: 1
         property var answers: ({})
         function status() {
-            return JSON.stringify({ wallet_dir: "/tmp/w", wallet_exists: probe.mode === "main", open: probe.mode === "main",
-                                    open_result: { prover: { gpu: true } }, settings: Fake.settings() })
+            return JSON.stringify({ wallet_dir: "/tmp/w", wallet_exists: probe.mode === "main" && !probe.onboard, wallet_unconfirmed: false, open: probe.mode === "main" && !probe.onboard,
+                                    open_result: { prover: { gpu: true } }, settings: Fake.settings(probe.onboard) })
         }
         function start(method, params) {
             var t = "t" + (next++)
-            var r = Fake.answer(method, JSON.parse(params), { stale: probe.stale, offline: probe.offline })
+            var r = Fake.answer(method, JSON.parse(params), { stale: probe.stale, offline: probe.offline, onboard: probe.onboard })
             var a = answers; a[t] = r && r.__error ? { id: null, error: r.__error } : { id: null, result: r }; answers = a
             return JSON.stringify({ ticket: t })
         }
@@ -53,7 +55,42 @@ Window {
     }
 
     // Steps: [what to do, screenshot name].
-    property var steps: probe.mode === "setup" ? [[function() {}, "welcome-start"],
+    function tourStep(i) { return [function() { var t = probe.find(view.item, "tour"); if (i === 0) view.item.startTour(); else t.go(i) }, "tour-" + (i + 1)] }
+    // Onboarding v2: Welcome (the wallet made and its WBTC claimed in the background), the
+    // phrase, arriving, then the next-step bar through borrow and save, and the tour.
+    property var onboardSteps: [
+        [function() {}, "onboard-welcome"],
+        [function() { view.item.newWallet() }, "onboard-phrase"],
+        [function() { view.item.starterQueue = ["WBTC"]; view.item.starterStarted = Date.now() - 42000; view.item.welcomeStep = "arriving" }, "onboard-arriving"],
+        [function() { view.item.starterQueue = [] }, "onboard-arrived"],
+        [function() { view.item.enterMain() }, "onboard-bar-borrow"],
+        [function() { view.item.startCoach("borrow") }, "coach-borrow-1-nav"],
+        [function() { view.item.tab = 1 }, "coach-borrow-2-row"],
+        [function() { view.item.openMarket = Fake.MARKET2 }, "coach-borrow-3-button"],
+        [function() { view.item.openPosition(Fake.MARKET2, Fake.PUB, "borrow") }, "coach-borrow-4-private"],
+        [function() { view.item.actAs = Fake.PRIV }, "coach-borrow-5-add"],
+        [function() { probe.find(view.item, "positionPage").opIndex = 2 }, "coach-borrow-6-amount"],
+        [function() { probe.find(view.item, "coach").step.act() }, "coach-borrow-7-go"],
+        [function() { probe.find(view.item, "positionPage").submit() }, "coach-borrow-8-dive"],
+        [function() { view.item.dive = null; view.item.refreshAll() }, "coach-borrow-9-op"],
+        [function() { probe.find(view.item, "positionPage").opIndex = 4 }, "coach-borrow-10-amount"],
+        [function() { probe.find(view.item, "coach").step.act() }, "coach-borrow-11-go"],
+        [function() { probe.find(view.item, "positionPage").submit() }, "coach-borrow-12-dive"],
+        [function() { view.item.dive = null; view.item.refreshAll() }, "coach-borrow-13-done"],
+        [function() {}, "coach-borrow-14-next"],
+        [function() { probe.find(view.item, "coach").step.act() }, "coach-save-1-switch"],
+        [function() { view.item.tab = 0 }, "coach-save-1-nav"],
+        [function() { view.item.tab = 1 }, "coach-save-2-row"],
+        [function() { view.item.openMarket = Fake.MARKET }, "coach-save-3-button"],
+        [function() { view.item.openPosition(Fake.MARKET, "", "supply") }, "coach-save-4-amount"],
+        [function() { probe.find(view.item, "coach").step.act() }, "coach-save-5-go"],
+        [function() { probe.find(view.item, "positionPage").submit() }, "coach-save-6-dive"],
+        [function() { view.item.dive = null; view.item.refreshAll() }, "coach-save-7-done"],
+        [function() { probe.find(view.item, "coach").step.act() }, "onboard-bar-done"],
+        tourStep(0), tourStep(1), tourStep(2), tourStep(3), tourStep(4), tourStep(5), tourStep(6), tourStep(7), tourStep(8),
+        [function() { probe.find(view.item, "tour").go(9) }, "onboard-after-tour"]
+    ]
+    property var steps: probe.onboard ? onboardSteps : probe.mode === "setup" ? [[function() {}, "welcome-start"],
                                                   [function() { view.item.createWallet("", "") }, "welcome-phrase"],
                                                   [function() { view.item.welcomeStep = "restore" }, "welcome-restore"],
                                                   [function() { view.item.accounts = Fake.answer("accounts", {}, {}); view.item.welcomeStep = "ready" }, "welcome-ready"]]
@@ -81,12 +118,23 @@ Window {
         [function() { view.item.selectedJob = "1793023410000-0000" }, "activity-interrupted"],
         [function() { view.item.selectedJob = "1793023420000-0000" }, "activity-dropped"],
         [function() { view.item.selectedJob = "1793023430000-0000" }, "activity-rejected"],
-        [function() { view.item.dive = { job: "1793023400000-0000", title: "Pay back 1,000 TKB on Private · Main", seen: "Some position paid back 1,000 TKB." } }, "dive"],
+        [function() { view.item.dive = { job: "1793023400000-0000", title: "Pay back 1,000 USDC on Private · Main", seen: "Some position paid back 1,000 USDC." } }, "dive"],
         [function() { view.item.dive = { title: "Moving 5 LEZ to Private · Main", started: Date.now() - 30000, seen: "5 LEZ left your Everyday account. Not where it went.",
                                          error: { code: "unconfirmed", message: "tx … went out, but the network has made almost no blocks since" } } }, "dive-transfer-unsure"],
         [function() { view.item.dive = null; view.item.tab = 0 }, "wallet-after"]
     ]
     property int step: 0
+    // "frames": the Welcome intro, a frame every 200 ms for 5 s (setup mode), then exit.
+    readonly property bool frames: Qt.application.arguments.indexOf("frames") >= 0
+    Timer {
+        interval: 200; repeat: true; running: probe.frames && view.status === Loader.Ready
+        property int n: 0
+        onTriggered: {
+            var name = "intro-" + (n < 10 ? "0" : "") + n
+            probe.contentItem.grabToImage(function(r) { r.saveToFile(probe.out + "/" + name + ".png") })
+            if (++n > 35) Qt.exit(0)
+        }
+    }
 
     // The first item under `item` with this objectName (Popups' content included).
     function find(item, name) {
@@ -101,7 +149,7 @@ Window {
     function land(op, account, priv) {
         view.item.openPosition(Fake.MARKET, account, op)
         var p = find(view.item, "positionPage")
-        p.landed = { op: op, symbol: op === "supply_collateral" ? "TKA" : "TKB", loanSym: "TKB", loanDec: 6, collDec: 6, amountText: "1,000",
+        p.landed = { op: op, symbol: op === "supply_collateral" ? "WETH" : "USDC", loanSym: "USDC", loanDec: 6, collDec: 18, amountText: "1,000",
                      key: p.posKey, before: { saved: "0", coll: p.coll, debt: "0" }, account: account, to: "", isPrivate: priv, apr: "0.18" }
         p.play()
     }
@@ -109,7 +157,7 @@ Window {
 
     Timer {
         interval: 1500
-        running: view.status === Loader.Ready
+        running: view.status === Loader.Ready && !probe.frames
         repeat: true
         onTriggered: {
             if (probe.step >= probe.steps.length) { Qt.exit(0); return }

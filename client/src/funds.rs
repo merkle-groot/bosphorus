@@ -49,6 +49,7 @@ pub async fn create_wallet(home: &Path, sequencer: &str, mnemonic: Option<&str>,
         "seq_tx_poll_max_blocks": 360,
         "seq_poll_max_retries": 1,
         "seq_block_poll_max_amount": 100,
+        "gas_limit": crate::APP_GAS_LIMIT,
     });
     std::fs::write(&config_path, serde_json::to_vec_pretty(&config)?)?;
     restrict(&config_path, 0o600)?;

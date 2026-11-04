@@ -59,6 +59,11 @@ Item {
     }
     readonly property var aboveRows: rows(aboveId)
     readonly property var belowRows: rows(belowId)
+    // The Everyday row of a token (Get started's "Dive WETH ↓"), or null.
+    function rowFor(symbol) {
+        for (var i = 0; i < aboveRows.length; i++) if (aboveRows[i].symbol === symbol) return aboveRows[i]
+        return null
+    }
 
     // An account's screened lots: approved ones summed per token, pending ones one by one.
     function screenedRows(id) {
@@ -256,6 +261,7 @@ Item {
         }
         Row {
             id: actions
+            objectName: tr.deep ? "" : "rowActions"
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             width: 168
@@ -398,6 +404,7 @@ Item {
         }
         Rectangle {
             id: chip
+            objectName: zh.deep ? "" : "addressChip"
             visible: zh.account !== ""
             property bool copied: false
             implicitHeight: 30
@@ -464,7 +471,7 @@ Item {
         // Above the surface.
         Item {
             Layout.fillWidth: true
-            Layout.preferredHeight: Math.min(aboveCol.implicitHeight + 28, page.height * 0.48)
+            Layout.preferredHeight: Math.min(aboveCol.implicitHeight + 28, page.height * (getStarted.visible ? 0.62 : 0.48))
             Flickable {
                 anchors.fill: parent
                 anchors.leftMargin: 32
@@ -477,7 +484,14 @@ Item {
                     width: Math.min(parent.width, 880)
                     x: (parent.width - width) / 2
                     spacing: 0
+                    GetStarted {
+                        id: getStarted
+                        visible: page.app.onboarding
+                        app: page.app
+                        wallet: page
+                    }
                     ZoneHeader {
+                        objectName: "zoneAbove"
                         title: qsTr("Public Accounts")
                         subtitle: qsTr("Everyday · anyone can see")
                         account: page.aboveId
@@ -514,6 +528,7 @@ Item {
                     spacing: 0
                     opacity: page.app.online ? 1 : 0.85
                     ZoneHeader {
+                        objectName: "zoneBelow"
                         deep: true
                         title: qsTr("Private Accounts")
                         subtitle: qsTr("Private · only this computer can see")

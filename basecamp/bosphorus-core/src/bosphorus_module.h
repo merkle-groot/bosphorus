@@ -24,10 +24,15 @@ extern "C" {
 // polls both.
 //
 // Requests to `start`: `create_wallet` {"sequencer", "mnemonic"?, "sync_from"?}, `open`
-// {"lending", "pool"?}, and every method of the app API but `wait` (it would hold a worker for up to an
-// hour; poll `job` instead).
+// {"lending", "pool"?, "faucet"?, "scan_from"?}, `confirm_wallet` and `discard_wallet` (below), and every method of the app
+// API but `wait` (it would hold a worker for up to an hour; poll `job` instead).
 //
-// `<persistence>/settings.json` ({"sequencer"?, "lending"?, "pool"?}), if present, fills in what a
+// A new wallet (no mnemonic) is unconfirmed until `confirm_wallet`: the view makes one as Welcome
+// opens, so its first claim proves while the user reads, and confirms it once its phrase was
+// shown and acknowledged. `discard_wallet` deletes only an unconfirmed wallet (Restore instead, or
+// Basecamp closed before the phrase was seen: nobody could ever recover it).
+//
+// `<persistence>/settings.json` ({"sequencer"?, "lending"?, "pool"?, "faucet"?, "scan_from"?}), if present, fills in what a
 // `create_wallet` or `open` request leaves out, and `status` returns it for the view's fields.
 // Its "tokens" object ({"Public/<token id>": "SYMBOL"}) names tokens in the view. Dev only: its "prefill" object ({"transfer_to", "transfer_amount", "amount", "to", "index"},
 // strings) fills the view's input fields at start and on Refresh.
@@ -44,7 +49,7 @@ public:
     std::string name() const;
     std::string version() const;
 
-    /// {"wallet_dir", "wallet_exists", "open", "open_result", "settings"}: what the view needs to choose its first screen.
+    /// {"wallet_dir", "wallet_exists", "wallet_unconfirmed", "open", "open_result", "settings"}: what the view needs to choose its first screen.
     std::string status();
     /// {"ticket": "<id>"} at once; the answer comes from take(ticket).
     std::string start(const std::string& method, const std::string& paramsJson);
@@ -58,6 +63,8 @@ private:
     std::string walletDir();
     std::string dataDir();
     std::string settingsPath();
+    std::string unconfirmedPath();
+    std::string discardWallet();
     static std::string takeFfiString(char* value);
     static std::string error(const std::string& code, const std::string& message);
     void reapWorkers();
@@ -72,4 +79,7 @@ private:
     std::mutex m_openMutex;
     std::atomic<BosApp*> m_app{nullptr};
     std::string m_openResult;
+    // Calls that may hold m_app (counted before they load it), so a discard closes the app only
+    // once none is left.
+    std::atomic<int> m_inflight{0};
 };

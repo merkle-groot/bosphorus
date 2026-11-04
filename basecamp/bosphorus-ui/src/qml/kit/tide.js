@@ -29,13 +29,12 @@ var card = "#66000000"            // the error card
 // Wallet v2 (docs/design/wallet-v2/HANDOFF.md): a token's badge [glyph, fill, text colour] and its
 // second line, by symbol; tokens list in `tokenOrder`, then by symbol, LEZ last.
 var tokenLooks = {
-    USDC: ["$", "#2775CA", "#FFFFFF", "US dollar coin"],
-    WBTC: ["₿", "#F7931A", "#0B1424", "Wrapped bitcoin"],
-    TKA: ["A", "#6B5BD6", "#FFFFFF", "Test token A"],
-    TKB: ["B", "#2BB3A3", "#0B1424", "Test token B"],
+    USDC: ["$", "#2775CA", "#FFFFFF", "US dollar coin · test"],
+    WETH: ["Ξ", "#627EEA", "#FFFFFF", "Wrapped ether · test"],
+    WBTC: ["₿", "#F7931A", "#0B1424", "Wrapped bitcoin · test"],
     LEZ: ["L", "#E6ECF5", "#0B1424", "Pays network fees"]
 }
-var tokenOrder = ["USDC", "WBTC", "TKA", "TKB"]
+var tokenOrder = ["USDC", "WETH", "WBTC"]
 
 function look(symbol) {
     return tokenLooks[symbol] || [String(symbol || "?").charAt(0), "#3A4A66", "#FFFFFF", ""]

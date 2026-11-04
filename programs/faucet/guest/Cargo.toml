@@ -1,0 +1,14 @@
+[package]
+name = "bosphorus-faucet-guest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "faucet"
+path = "src/bin/faucet.rs"
+
+[dependencies]
+borsh.workspace = true
+lee_core.workspace = true
+bosphorus-faucet.workspace = true

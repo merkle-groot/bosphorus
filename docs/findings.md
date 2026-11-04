@@ -17,6 +17,7 @@ A full review of code and docs at `28daacc` (Phase 4), before Phase 5.
 | F9 any account can receive a supply; since E9 its owner can withdraw it | **Accepted** (E9, 2026-10-21, info). Was a stuck gift before E9; now an ordinary gift. |
 | F10–F20 the app under failure (2026-10-27) | **Fixed** (F20 partly), committed in `690f4ca`. Found by fault injection (`basecamp/dev/faultproxy.py`, `faults.py`) and code reading; see "App findings" below. |
 | F21 block scans skip blocks the sequencer doesn't return | **Fixed** for lending scans (2026-10-29, uncommitted): `Scanner.missing`; disclosure requests refuse a gap, the keeper logs it. **Open** for the pool's ASP scan (`client/src/pool.rs`: a deposit in a missing block stays pending; ragequit still works) and the wallet's own sync. See "App findings". |
+| F22 a private faucet claim can't land from a CPU prover | **Fixed in the client** (2026-11-04, uncommitted): on a CPU (no GPU, not dev mode) a private claim's `t` is set 7 min ahead (`CPU_CLAIM_LEAD_MS`), so the program's 10 min window is open when the proof lands. Program unchanged. See "App findings". |
 | S1–S17, P1–P8 self-review (2026-10-30) | **Open** (S15 accepted). Five high: S1 liquidation stalled by dust top-ups, S2 attacker market as the app's default, S3 keeper trust bypass (F1 is weaker than stated), S4 RPC operator links accounts to private positions, S5 E11 cover set narrowable. Plus 8 pitch overclaims. Report and remediation order: `docs/self-review-2026-10-30.md`; details `docs/experiments/stress-test-2026-10-30.md`. |
 | D1–D3 STATUS/CLAUDE.md stale lines | Fixed in STATUS.md and CLAUDE.md. |
 | D4, D5, D7, D8 design doc | Fixed. |
@@ -263,6 +264,19 @@ unless said otherwise.
   keeper would never have seen those positions either. Fix: the scanner compares returned block
   ids with the range asked and records gaps; `market_positions` (disclosure) refuses them, the
   keeper logs them. Not fixed: the pool's ASP scan and the wallet's sync use the same RPC.
+
+- **F22 (high for CPU users, 2026-11-04): a private faucet claim from a CPU prover never lands.**
+  The faucet takes a claim only inside `[t, t + CLAIM_WINDOW_MS)` (10 min, a program constant), and
+  the client set `t` to the time it started proving. A CPU proof of a claim (faucet + the chained
+  token mint) took ~11 min in Basecamp on localnet, so the sequencer skipped it: "Execution outside
+  of the validity window". The app reported `not_included` correctly. E12 never hit it, as the M1
+  GPU proves a claim in ~70 s; anyone without one (Linux, plan §8; a Mac without Metal) can't get
+  the starter at all. Fix without a new faucet image (which would mean new tokens and markets, as
+  their mint authority is the faucet's PDA): the client sets `t` 7 min ahead on a CPU, so the
+  window spans 7–17 min after the proof starts; GPU and dev mode keep `t` = now (a claim landing
+  before `t` is refused too). Checked: a CPU claim from `bos` on localnet with a 6 min lead landed
+  after 901 s (block 1098). The cooldown shifts by the lead. Lending ops weren't affected: their
+  windows are the client's (20 min private profile). Sturdier, open: hold an early proof until `t`.
 
 ## Doc findings
 

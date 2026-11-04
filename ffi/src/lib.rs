@@ -66,6 +66,9 @@ struct OpenConfig {
     /// The screened pool (E10), `Public/<id>`.
     #[serde(default)]
     pool: Option<String>,
+    /// The faucet (onboarding), `Public/<id>`.
+    #[serde(default)]
+    faucet: Option<String>,
 }
 
 fn first_block() -> u64 {
@@ -110,6 +113,10 @@ fn open(config_json: &str) -> Result<(BosApp, Value), Value> {
         Some(pool) => Some(pool.parse::<Holder>().map_err(|e| error("bad_request", format!("pool: {e:#}")))?.id()),
         None => None,
     };
+    let faucet = match &config.faucet {
+        Some(faucet) => Some(faucet.parse::<Holder>().map_err(|e| error("bad_request", format!("faucet: {e:#}")))?.id()),
+        None => None,
+    };
     let data_dir = config.data_dir.unwrap_or_else(|| config.wallet_home.join("bosphorus-app"));
     let (keccak_po2, gpu) = bosphorus_client::proving::info();
     let result = json!({
@@ -126,14 +133,14 @@ fn open(config_json: &str) -> Result<(BosApp, Value), Value> {
         .build()
         .map_err(|e| error("failed", format!("starting the runtime: {e}")))?;
     let app = runtime
-        .block_on(App::open(Config { wallet_home: Some(config.wallet_home), lending, data_dir, scan_from: config.scan_from, pool }))
+        .block_on(App::open(Config { wallet_home: Some(config.wallet_home), lending, data_dir, scan_from: config.scan_from, pool, faucet }))
         .map_err(|e| json!({ "id": null, "error": ApiError::from_anyhow(&e) }))?;
     let events = tokio::sync::Mutex::new(app.subscribe());
     Ok((BosApp { app, events, runtime }, result))
 }
 
 /// Opens the app on a wallet and resumes its unfinished jobs. `config_json`:
-/// `{"wallet_home", "lending": "Public/<id>", "data_dir"?, "scan_from"?, "pool"?: "Public/<id>"}`. The wallet must exist
+/// `{"wallet_home", "lending": "Public/<id>", "data_dir"?, "scan_from"?, "pool"?: "Public/<id>", "faucet"?: "Public/<id>"}`. The wallet must exist
 /// (`wallet_config.json`, `storage.json`); `data_dir` defaults to `<wallet_home>/bosphorus-app`.
 ///
 /// The app must be the only writer of that wallet while it is open. It locks the wallet and data

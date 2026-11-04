@@ -1,11 +1,19 @@
 #include "bosphorus_module.h"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
+
+// Counts a call that may use the app for as long as it runs (see m_inflight).
+struct InFlight {
+    std::atomic<int>& n;
+    explicit InFlight(std::atomic<int>& count) : n(count) { ++n; }
+    ~InFlight() { --n; }
+};
 
 BosphorusModule::BosphorusModule() = default;
 
@@ -61,6 +69,12 @@ std::string BosphorusModule::dataDir()
     return (std::filesystem::path(instancePersistencePath()) / "app").string();
 }
 
+// Present while the wallet is unconfirmed (made as Welcome opened, its phrase not yet acknowledged).
+std::string BosphorusModule::unconfirmedPath()
+{
+    return (std::filesystem::path(instancePersistencePath()) / "wallet-unconfirmed").string();
+}
+
 std::string BosphorusModule::settingsPath()
 {
     if (!isContextReady() || instancePersistencePath().empty())
@@ -80,9 +94,20 @@ static json readSettings(const std::string& path)
     json s = json::parse(file, nullptr, false);
     if (!s.is_object())
         return out;
-    for (const char* key : {"sequencer", "lending", "pool"}) {
+    for (const char* key : {"sequencer", "lending", "pool", "faucet"}) {
         if (s.contains(key) && s[key].is_string())
             out[key] = s[key];
+    }
+    // The block the market scan starts at (the lending program's deploy block).
+    if (s.contains("scan_from") && s["scan_from"].is_number_unsigned())
+        out["scan_from"] = s["scan_from"];
+    // "markets": ["<market id hex>", …], the only markets the view shows (old ones stay on chain).
+    if (s.contains("markets") && s["markets"].is_array()) {
+        json ids = json::array();
+        for (auto& id : s["markets"])
+            if (id.is_string())
+                ids.push_back(id);
+        out["markets"] = ids;
     }
     // "tokens": {"Public/<token id>": "SYMBOL"}, the names the view shows (token programs have
     // none). Dev only, "prefill": text for the view's input fields, so a test can drive it with
@@ -108,6 +133,7 @@ std::string BosphorusModule::status()
     return json{
         {"wallet_dir", wallet.empty() ? json(nullptr) : json(wallet)},
         {"wallet_exists", !wallet.empty() && std::filesystem::exists(std::filesystem::path(wallet) / "storage.json", ignored)},
+        {"wallet_unconfirmed", !wallet.empty() && std::filesystem::exists(unconfirmedPath(), ignored)},
         {"open", m_app.load() != nullptr},
         {"open_result", m_openResult.empty() ? json(nullptr) : json::parse(m_openResult, nullptr, false)},
         {"settings", readSettings(settingsPath())},
@@ -154,6 +180,7 @@ std::string BosphorusModule::take(const std::string& ticket)
 
 std::string BosphorusModule::events()
 {
+    InFlight busy(m_inflight);
     BosApp* app = m_app.load();
     if (!app)
         return json{{"events", json::array()}, {"lagged", 0}}.dump();
@@ -161,6 +188,28 @@ std::string BosphorusModule::events()
     if (r.is_object() && r.contains("result"))
         return r["result"].dump();
     return json{{"events", json::array()}, {"lagged", 0}}.dump();
+}
+
+// Deletes an unconfirmed wallet and its jobs: stops the app (calls in flight answer at once; a
+// claim being proven sends nothing), waits for every other call to let go of it, closes it.
+std::string BosphorusModule::discardWallet()
+{
+    std::error_code ignored;
+    if (!std::filesystem::exists(unconfirmedPath(), ignored))
+        return error("confirmed", "this wallet's phrase was shown: it is never discarded");
+    std::lock_guard<std::mutex> lock(m_openMutex);
+    if (BosApp* app = m_app.exchange(nullptr)) {
+        bos_app_stop(app);
+        // This call counts itself.
+        while (m_inflight.load() > 1)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        bos_app_close(app);
+    }
+    m_openResult.clear();
+    std::filesystem::remove_all(walletDir(), ignored);
+    std::filesystem::remove_all(dataDir(), ignored);
+    std::filesystem::remove(unconfirmedPath(), ignored);
+    return json{{"id", nullptr}, {"result", {{"discarded", true}}}}.dump();
 }
 
 void BosphorusModule::reapWorkers()
@@ -185,6 +234,7 @@ void BosphorusModule::reapWorkers()
 
 std::string BosphorusModule::run(const std::string& method, const std::string& paramsJson)
 {
+    InFlight busy(m_inflight);
     json params = paramsJson.empty() ? json::object() : json::parse(paramsJson, nullptr, false);
     if (params.is_discarded() || !params.is_object())
         return error("bad_request", "params must be a JSON object");
@@ -197,13 +247,31 @@ std::string BosphorusModule::run(const std::string& method, const std::string& p
         if (!params.contains("sequencer") && defaults.contains("sequencer"))
             params["sequencer"] = defaults["sequencer"];
         params["wallet_home"] = wallet;
-        return takeFfiString(bos_wallet_create(params.dump().c_str()));
+        std::error_code ignored;
+        const auto storage = std::filesystem::path(wallet) / "storage.json";
+        // An existing wallet is never marked (create_wallet refuses it anyway).
+        const bool fresh = !params.contains("mnemonic") && !std::filesystem::exists(storage, ignored);
+        // Marked before the wallet exists: a crash in between leaves a marker without a wallet
+        // (harmless), never an unmarked wallet nobody saw the phrase of.
+        if (fresh)
+            std::ofstream(unconfirmedPath()) << "phrase not shown yet\n";
+        std::string created = takeFfiString(bos_wallet_create(params.dump().c_str()));
+        if (fresh && !std::filesystem::exists(storage, ignored))
+            std::filesystem::remove(unconfirmedPath(), ignored);
+        return created;
     }
+    if (method == "confirm_wallet") {
+        std::error_code ignored;
+        std::filesystem::remove(unconfirmedPath(), ignored);
+        return json{{"id", nullptr}, {"result", {{"confirmed", true}}}}.dump();
+    }
+    if (method == "discard_wallet")
+        return discardWallet();
     if (method == "open") {
         std::lock_guard<std::mutex> lock(m_openMutex);
         if (m_app.load())
             return json{{"id", nullptr}, {"result", json::parse(m_openResult, nullptr, false)}}.dump();
-        for (const char* key : {"lending", "pool"}) {
+        for (const char* key : {"lending", "pool", "faucet", "scan_from"}) {
             if (!params.contains(key) && defaults.contains(key))
                 params[key] = defaults[key];
         }
