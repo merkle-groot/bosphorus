@@ -4,16 +4,16 @@
 
 use bosphorus_core::{claims, validate_lltv};
 use bosphorus_lending::{
-    AdminOp, Config, Effect, Event, HealthClaim, Instruction, MAX_ASSETS, MAX_IRMS, MAX_LLTVS, Market, MarketAccounts,
-    MarketId, MarketOp, MarketParams, MarketState, Position, PositionOp, Salt, Shard, Window, collateral_vault_seed,
-    config_id, loan_vault_seed, position_id, transfer,
+    AdminOp, Config, Effect, Event, Funding, HealthClaim, Instruction, MAX_ASSETS, MAX_IRMS, MAX_LLTVS, Market,
+    MarketAccounts, MarketId, MarketOp, MarketParams, MarketState, Position, PositionOp, Salt, Shard, Window,
+    collateral_vault_seed, config_id, loan_vault_seed, pool_pay, pool_withdraw, position_id, transfer,
 };
 use bosphorus_oracle::Feed;
 use lee_core::{
     account::AccountId,
     program::{
-        AccountMeta, PROGRAM_LOADER_ACCOUNT_ID, Plan, PlanInput, ProgramEvent, ProgramHeader, TimestampValidityWindow,
-        run_program,
+        AccountMeta, PROGRAM_LOADER_ACCOUNT_ID, PdaSeed, Plan, PlanInput, ProgramEvent, ProgramHeader,
+        TimestampValidityWindow, run_program,
     },
 };
 
@@ -73,6 +73,66 @@ fn payout(owner: &AccountMeta, rest: &[AccountMeta]) -> AccountId {
         [to] => to.account_id,
         _ => panic!("too many accounts"),
     }
+}
+
+/// Splits a screened market's trailing pool accounts (`n` of them) off `accounts`.
+fn pool_tail<'a>(params: &MarketParams, accounts: &'a [AccountMeta], n: usize) -> (&'a [AccountMeta], &'a [AccountMeta]) {
+    if params.pool.is_none() {
+        return (accounts, &[]);
+    }
+    assert!(accounts.len() >= n, "a screened market's ops list its pool accounts last");
+    accounts.split_at(accounts.len() - n)
+}
+
+/// `[pool_config, escrow]` of `asset`, checked against the market's pool.
+fn pool_ids(params: &MarketParams, asset: &AccountId, config: &AccountMeta, escrow: &AccountMeta) -> [AccountId; 2] {
+    let expected = params.pool_accounts(asset).expect("screened");
+    assert_eq!([config.account_id, escrow.account_id], expected, "wrong pool accounts");
+    expected
+}
+
+/// An inflow of `amount` into `vault`: a transfer from `payer`, or in a screened market the payer's
+/// lots (`funding`, summing to `amount`) through the pool. `pool` is `[pool_config, escrow]`.
+#[allow(clippy::too_many_arguments, reason = "the parts of one payment")]
+fn pay_in(
+    plan: &mut Plan,
+    params: &MarketParams,
+    asset: AccountId,
+    payer: AccountId,
+    vault: AccountId,
+    amount: u128,
+    funding: Option<Funding>,
+    pool: [&AccountMeta; 2],
+) {
+    match (params.pool, funding) {
+        (None, None) => plan.call(transfer(asset, payer, vault, amount, None)),
+        (Some(pool_program), Some(funding)) => {
+            let total = funding.spends.iter().try_fold(0u128, |sum, s| sum.checked_add(s.amount)).expect("amount overflow");
+            assert_eq!(total, amount, "the lots don't sum to the amount paid");
+            let accounts = pool_ids(params, &asset, pool[0], pool[1]);
+            plan.call(pool_withdraw(pool_program, asset, payer, accounts, vault, funding));
+        }
+        (None, Some(_)) => panic!("not a screened market: pay without funding"),
+        (Some(_), None) => panic!("a screened market is paid from pool lots: funding needed"),
+    }
+}
+
+/// An outflow of `amount` from `vault` (`seed`) to `to`: a transfer, or in a screened market into
+/// `to`'s market lot through the pool. `pool` is `[pool_config, escrow]` (unused when unscreened).
+#[allow(clippy::too_many_arguments, reason = "the parts of one payment")]
+fn pay_out(plan: &mut Plan, params: &MarketParams, asset: AccountId, vault: AccountId, seed: PdaSeed, to: AccountId, amount: u128, pool: &[&AccountMeta]) {
+    match params.pool {
+        None => plan.call(transfer(asset, vault, to, amount, Some(seed))),
+        Some(pool_program) => {
+            let accounts = pool_ids(params, &asset, pool[0], pool[1]);
+            plan.call(pool_pay(pool_program, asset, vault, seed, accounts, to, amount));
+        }
+    }
+}
+
+/// The two pool accounts of a screened op, or placeholders (never read) when unscreened.
+fn pair<'a>(pool: &'a [AccountMeta], escrow: usize, unused: &'a AccountMeta) -> [&'a AccountMeta; 2] {
+    if pool.is_empty() { [unused, unused] } else { [&pool[0], &pool[escrow]] }
 }
 
 fn price_check(plan: &mut Plan, params: &MarketParams, feed: &AccountMeta, health: &HealthClaim, end: u64) {
@@ -145,22 +205,25 @@ fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             window(&mut plan, w);
             event(&mut plan, Event::MarketCreated { market_id, params });
         }
-        Instruction::Supply { params, assets, rs, window: w } => {
+        Instruction::Supply { params, assets, rs, window: w, funding } => {
+            let (accounts, pool) = pool_tail(&params, accounts, 2);
             let [market_account, position, payer, loan_vault] = accounts else {
-                panic!("takes [market, position, payer, loan_vault]")
+                panic!("takes [market, position, payer, loan_vault, (pool_config, escrow)]")
             };
             let (market_id, m) = market(this, &params, market_account);
             assert_eq!(loan_vault.account_id, m.loan_vault, "wrong loan vault");
             let shares = ok(claims::supply_shares(assets, &rs));
             plan.effect(market_account, &Effect::Market { t: w.t, op: MarketOp::Supply { rs, assets, shares } });
             plan.effect(position, &Effect::Position { market_id, op: PositionOp::Supply { shares } });
-            plan.call(transfer(params.loan_asset, payer.account_id, m.loan_vault, assets, None));
+            let pool = pair(pool, 1, payer);
+            pay_in(&mut plan, &params, params.loan_asset, payer.account_id, m.loan_vault, assets, funding, pool);
             window(&mut plan, w);
             event(&mut plan, Event::Supply { market_id, position: position.account_id, assets, shares });
         }
         Instruction::Withdraw { params, shares, salt, rs, window: w } => {
+            let (accounts, pool) = pool_tail(&params, accounts, 2);
             let [owner, market_account, position, loan_vault, rest @ ..] = accounts else {
-                panic!("takes [owner, market, position, loan_vault, (to)]")
+                panic!("takes [owner, market, position, loan_vault, (to), (pool_config, escrow)]")
             };
             let (market_id, m) = market(this, &params, market_account);
             owned_or_held(this, &market_id, owner, position, &salt);
@@ -169,26 +232,30 @@ fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             plan.effect(market_account, &Effect::Market { t: w.t, op: MarketOp::Withdraw { rs, shares, assets } });
             plan.effect(position, &Effect::Position { market_id, op: PositionOp::Withdraw { shares } });
             let to = payout(owner, rest);
-            plan.call(transfer(params.loan_asset, m.loan_vault, to, assets, Some(loan_vault_seed(&market_id))));
+            let pool: Vec<_> = pool.iter().collect();
+            pay_out(&mut plan, &params, params.loan_asset, m.loan_vault, loan_vault_seed(&market_id), to, assets, &pool);
             window(&mut plan, w);
             event(&mut plan, Event::Withdraw { market_id, position: position.account_id, assets, shares });
         }
-        Instruction::SupplyCollateral { params, assets } => {
+        Instruction::SupplyCollateral { params, assets, funding } => {
+            let (accounts, pool) = pool_tail(&params, accounts, 2);
             let [position, payer, collateral_vault] = accounts else {
-                panic!("takes [position, payer, collateral_vault]")
+                panic!("takes [position, payer, collateral_vault, (pool_config, escrow)]")
             };
             let market_id = params.id();
             let m = MarketAccounts::new(this, &market_id);
             assert_eq!(collateral_vault.account_id, m.collateral_vault, "wrong collateral vault");
             assert!(assets > 0, "zero amount");
             plan.effect(position, &Effect::Position { market_id, op: PositionOp::SupplyCollateral { assets } });
-            plan.call(transfer(params.collateral_asset, payer.account_id, m.collateral_vault, assets, None));
+            let pool = pair(pool, 1, payer);
+            pay_in(&mut plan, &params, params.collateral_asset, payer.account_id, m.collateral_vault, assets, funding, pool);
             event(&mut plan, Event::SupplyCollateral { market_id, position: position.account_id, assets });
         }
         Instruction::WithdrawCollateral { params, assets, salt, health } => {
             assert!(assets > 0, "zero amount");
             let market_id = params.id();
             let m = MarketAccounts::new(this, &market_id);
+            let (accounts, pool) = pool_tail(&params, accounts, 2);
             let (owner, position, collateral_vault, rest) = match (&health, accounts) {
                 (Some(claim), [owner, market_account, position, feed, collateral_vault, rest @ ..]) => {
                     market(this, &params, market_account);
@@ -206,13 +273,14 @@ fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             let health = health.map(|claim| ok(claims::health(&claim.price, &claim.rb, params.lltv)));
             plan.effect(position, &Effect::Position { market_id, op: PositionOp::WithdrawCollateral { assets, health } });
             let to = payout(owner, rest);
-            let seed = Some(collateral_vault_seed(&market_id));
-            plan.call(transfer(params.collateral_asset, m.collateral_vault, to, assets, seed));
+            let pool: Vec<_> = pool.iter().collect();
+            pay_out(&mut plan, &params, params.collateral_asset, m.collateral_vault, collateral_vault_seed(&market_id), to, assets, &pool);
             event(&mut plan, Event::WithdrawCollateral { market_id, position: position.account_id, assets });
         }
         Instruction::Borrow { params, assets, salt, health: claim } => {
+            let (accounts, pool) = pool_tail(&params, accounts, 2);
             let [owner, market_account, position, feed, loan_vault, rest @ ..] = accounts else {
-                panic!("takes [owner, market, position, feed, loan_vault, (to)]")
+                panic!("takes [owner, market, position, feed, loan_vault, (to), (pool_config, escrow)]")
             };
             let (market_id, m) = market(this, &params, market_account);
             owned(this, &market_id, owner, position, &salt);
@@ -225,12 +293,14 @@ fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             plan.effect(market_account, &Effect::Market { t: claim.window.t, op });
             plan.effect(position, &Effect::Position { market_id, op: PositionOp::Borrow { shares, health } });
             let to = payout(owner, rest);
-            plan.call(transfer(params.loan_asset, m.loan_vault, to, assets, Some(loan_vault_seed(&market_id))));
+            let pool: Vec<_> = pool.iter().collect();
+            pay_out(&mut plan, &params, params.loan_asset, m.loan_vault, loan_vault_seed(&market_id), to, assets, &pool);
             event(&mut plan, Event::Borrow { market_id, position: position.account_id, assets, shares });
         }
-        Instruction::Liquidate { params, claimed, amount, price, rb, window: w } => {
+        Instruction::Liquidate { params, claimed, amount, price, rb, window: w, funding } => {
+            let (accounts, pool) = pool_tail(&params, accounts, 3);
             let [liquidator, market_account, position, feed, loan_vault, collateral_vault, rest @ ..] = accounts else {
-                panic!("takes [liquidator, market, position, feed, loan_vault, collateral_vault, (to)]")
+                panic!("takes [liquidator, market, position, feed, loan_vault, collateral_vault, (to), (pool_config, loan_escrow, collateral_escrow)]")
             };
             let (market_id, m) = market(this, &params, market_account);
             assert_eq!(loan_vault.account_id, m.loan_vault, "wrong loan vault");
@@ -250,11 +320,13 @@ fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             let op = PositionOp::Liquidate { claimed, health, liquidation };
             plan.effect(position, &Effect::Position { market_id, op });
             let l = liquidation;
-            plan.call(transfer(params.loan_asset, liquidator.account_id, m.loan_vault, l.repaid_assets, None));
+            let loan_pool = pair(pool, 1, liquidator);
+            pay_in(&mut plan, &params, params.loan_asset, liquidator.account_id, m.loan_vault, l.repaid_assets, funding, loan_pool);
             if l.seized != 0 {
                 let to = payout(liquidator, rest);
-                let seed = Some(collateral_vault_seed(&market_id));
-                plan.call(transfer(params.collateral_asset, m.collateral_vault, to, l.seized, seed));
+                let collateral_pool: Vec<_> = if pool.is_empty() { vec![] } else { vec![&pool[0], &pool[2]] };
+                let seed = collateral_vault_seed(&market_id);
+                pay_out(&mut plan, &params, params.collateral_asset, m.collateral_vault, seed, to, l.seized, &collateral_pool);
             }
             event(&mut plan, Event::Liquidate { market_id, position: position.account_id, liquidation });
         }
@@ -273,16 +345,18 @@ fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             plan.effect(position, &Effect::Position { market_id, op: PositionOp::Supply { shares } });
             event(&mut plan, Event::FeesClaimed { market_id, position: position.account_id, shares });
         }
-        Instruction::Repay { params, shares, rb, window: w } => {
+        Instruction::Repay { params, shares, rb, window: w, funding } => {
+            let (accounts, pool) = pool_tail(&params, accounts, 2);
             let [market_account, position, payer, loan_vault] = accounts else {
-                panic!("takes [market, position, payer, loan_vault]")
+                panic!("takes [market, position, payer, loan_vault, (pool_config, escrow)]")
             };
             let (market_id, m) = market(this, &params, market_account);
             assert_eq!(loan_vault.account_id, m.loan_vault, "wrong loan vault");
             let assets = ok(claims::repay_assets(shares, &rb));
             plan.effect(market_account, &Effect::Market { t: w.t, op: MarketOp::Repay { rb, shares, assets } });
             plan.effect(position, &Effect::Position { market_id, op: PositionOp::Repay { shares } });
-            plan.call(transfer(params.loan_asset, payer.account_id, m.loan_vault, assets, None));
+            let pool = pair(pool, 1, payer);
+            pay_in(&mut plan, &params, params.loan_asset, payer.account_id, m.loan_vault, assets, funding, pool);
             window(&mut plan, w);
             event(&mut plan, Event::Repay { market_id, position: position.account_id, assets, shares });
         }

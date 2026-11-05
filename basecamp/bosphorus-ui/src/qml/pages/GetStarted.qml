@@ -56,18 +56,18 @@ Rectangle {
                      button: coaching ? qsTr("Show me again") : qsTr("Show me"), enabled: true, act: function() { a.startCoach("borrow") } }
         }
         if (next === "save") {
-            if (a.claiming[usdc]) return { title: qsTr("Getting USDC to save"), detail: qsTr("%1 USDC from the faucet. Your computer is proving the claim: %2.").arg(dropText(usdc)).arg(a.diveTime) }
+            if (a.claiming[usdc]) return { title: qsTr("Getting USDC to lend"), detail: qsTr("%1 USDC from the faucet. Your computer is proving the claim: %2.").arg(dropText(usdc)).arg(a.diveTime) }
             if (!a.hasSaveUsdc && !a.claimedLately(usdc)) {
                 var usdcWait = a.claimWait("USDC")
-                return { title: qsTr("Get USDC to save"), detail: usdcWait !== "" ? usdcWait : qsTr("%1 USDC from the faucet, into your Private account.").arg(dropText(usdc)),
+                return { title: qsTr("Get USDC to lend"), detail: usdcWait !== "" ? usdcWait : qsTr("%1 USDC from the faucet, into your Private account.").arg(dropText(usdc)),
                          button: qsTr("Get USDC"), enabled: a.canClaim("USDC"), act: function() { a.claimToken("USDC") } }
             }
-            return { title: qsTr("Save %1 USDC").arg(amountText(saveRaw, usdc, 0)),
-                     detail: qsTr("Savers earn what borrowers pay. Private too: the market sees new savings, not whose. ")
+            return { title: qsTr("Lend %1 USDC").arg(amountText(saveRaw, usdc, 0)),
+                     detail: qsTr("Lenders earn what borrowers pay. Private too: the market sees new lending, not whose. ")
                              + (a.coachGoal === "save" ? qsTr("Follow the highlights.") : qsTr("We'll show you where.")),
                      button: a.coachGoal === "save" ? qsTr("Show me again") : qsTr("Show me"), enabled: true, act: function() { a.startCoach("save") } }
         }
-        return { title: qsTr("You're all set"), detail: qsTr("You borrowed and saved without anyone seeing it was you. A one-minute tour shows the rest."),
+        return { title: qsTr("You're all set"), detail: qsTr("You borrowed and lent without anyone seeing it was you. A one-minute tour shows the rest."),
                  button: qsTr("Take the tour"), enabled: true, act: function() { a.startTour() },
                  alt: qsTr("Hide"), altAct: function() { a.saveUi({ tourDone: true }) } }
     }
@@ -82,7 +82,7 @@ Rectangle {
             Layout.fillWidth: true
             spacing: 6
             Repeater {
-                model: [{ key: "starter", label: qsTr("WBTC") }, { key: "borrow", label: qsTr("Borrow") }, { key: "save", label: qsTr("Save") }]
+                model: [{ key: "starter", label: qsTr("WBTC") }, { key: "borrow", label: qsTr("Borrow") }, { key: "save", label: qsTr("Lend") }]
                 delegate: Rectangle {
                     readonly property bool isDone: bar.done(modelData.key)
                     readonly property bool isNext: bar.next === modelData.key

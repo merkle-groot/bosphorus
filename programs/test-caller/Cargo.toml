@@ -9,6 +9,12 @@ license.workspace = true
 name = "test_caller"
 path = "src/bin/test_caller.rs"
 
+# Spike (screened markets): a supply paid from pool lots in the same tx.
+[[bin]]
+name = "screened_supply"
+path = "src/bin/screened_supply.rs"
+
 [dependencies]
 lee_core.workspace = true
 bosphorus-token.workspace = true
+bosphorus-pool.workspace = true

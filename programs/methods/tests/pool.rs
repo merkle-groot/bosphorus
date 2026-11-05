@@ -165,7 +165,7 @@ impl World {
             .iter()
             .map(|(label, amount)| {
                 let index = set.index_of(label).unwrap_or(0);
-                Spend { label: *label, amount: *amount, path: set.path(sha256, index).unwrap() }
+                Spend { label: *label, amount: *amount, path: Some(set.path(sha256, index).unwrap()) }
             })
             .collect();
         Instruction::Withdraw { asset: self.token, spends, root: set.root }

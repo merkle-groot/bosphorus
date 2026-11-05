@@ -6,6 +6,10 @@
 //! proves, inside the private tx, that each label is under an accepted root, so the payout names
 //! no deposit. The depositor can always take a lot back publicly (`Ragequit`).
 //!
+//! Screened markets (`design/screened-markets.md`): a registered lending instance pays a market's
+//! outflows into the holder's one *market lot* of the asset (`Pay`); it spends without a Merkle
+//! path, since only this program writes `shard[pool]` and only a registered market credits it.
+//!
 //! Shared by the guest and clients: instructions with their account layouts, effects, shard
 //! layouts and PDA seeds. The lot and tree logic is in `bosphorus_provenance`.
 
@@ -43,11 +47,18 @@ pub enum Instruction {
     /// privacy). The ASP admits only deposits whose depositor shows a public debit (E10).
     Deposit { asset: AccountId, amount: u128, nonce: [u8; 32] },
     /// `[holder (signs), config, escrow (asset), to (asset)]`. Burns `spends` from the holder's
-    /// lots and pays their sum to `to`; each label must be under `root`, one of the accepted roots.
+    /// lots and pays their sum to `to`; each label must be under `root`, one of the accepted roots,
+    /// except the market lot's (no path). `root` is unchecked when every spend is the market lot's.
     Withdraw { asset: AccountId, spends: Vec<Spend>, root: Hash },
     /// `[depositor (signs, asset), record, holder (signs), escrow (asset)]`. The depositor takes
     /// back what is left of its lot, exactly `amount`, publicly and whether or not approved.
     Ragequit { asset: AccountId, label: Label, amount: u128 },
+    /// `[asp (signs), config]`. Lets `lending` (an instance id) pay into market lots, or stops it.
+    SetMarket { lending: AccountId, registered: bool },
+    /// `[vault (signs, asset), config, holder, escrow (asset)]`. Called by a registered lending
+    /// instance: moves `amount` from its vault into the escrow and merges it into the holder's
+    /// market lot of `asset`.
+    Pay { asset: AccountId, amount: u128 },
 }
 
 impl Instruction {
@@ -59,16 +70,19 @@ impl Instruction {
             Self::Deposit { .. } => "deposit",
             Self::Withdraw { .. } => "withdraw",
             Self::Ragequit { .. } => "ragequit",
+            Self::SetMarket { .. } => "set_market",
+            Self::Pay { .. } => "pay",
         }
     }
 }
 
 /// One lot spent by a withdrawal: never published (a private tx's instruction stays in the proof).
+/// `path` is `None` only for the market lot ([`market_label`]).
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Spend {
     pub label: Label,
     pub amount: u128,
-    pub path: MerklePath,
+    pub path: Option<MerklePath>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -95,6 +109,12 @@ pub enum Effect {
     Debit { asset: AccountId, spends: Vec<(Label, u128)> },
     /// Holder: the whole lot, exactly as claimed.
     Take(Lot),
+    /// Config: the signer must be the ASP.
+    SetMarket { signer: AccountId, lending: AccountId, registered: bool },
+    /// Config (read only): `caller` is a registered lending instance.
+    CheckMarket { caller: AccountId },
+    /// Holder: into its market lot.
+    Merge(Lot),
 }
 
 /// Lives in `PDA(pool, config_seed())`.
@@ -103,7 +123,11 @@ pub struct Config {
     pub asp: AccountId,
     /// Accepted roots of the approved set, oldest first (`bosphorus_provenance::push_root`).
     pub roots: Vec<Hash>,
+    /// Lending instances that may pay into market lots (`Pay`), at most [`MAX_MARKETS`].
+    pub markets: Vec<AccountId>,
 }
+
+pub const MAX_MARKETS: usize = 8;
 
 /// Lives in `PDA(pool, record_seed(label))`: public, so the ASP can screen the depositor.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -155,6 +179,12 @@ pub fn record_seed(label: &Label) -> PdaSeed {
 /// `SHA256("/bosphorus/v1/pool/label/" ‖ pool ‖ asset ‖ depositor ‖ nonce)`.
 pub fn deposit_label(pool: &AccountId, asset: &AccountId, depositor: &AccountId, nonce: &[u8; 32]) -> Label {
     sha256(&[b"/bosphorus/v1/pool/label/".as_slice(), pool.as_ref(), asset.as_ref(), depositor.as_ref(), nonce].concat())
+}
+
+/// The holder's one market lot of `asset`: `SHA256("/bosphorus/v1/pool/market/" ‖ asset)`. No
+/// deposit has it (deposit labels hash another domain), so it has no record and no ragequit.
+pub fn market_label(asset: &AccountId) -> Label {
+    sha256(&[b"/bosphorus/v1/pool/market/".as_slice(), asset.as_ref()].concat())
 }
 
 pub fn config_id(pool: &AccountId) -> AccountId {

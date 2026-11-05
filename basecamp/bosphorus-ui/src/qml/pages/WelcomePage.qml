@@ -9,7 +9,7 @@ import "../kit/units.js" as Units
 import "../kit/tide.js" as Tide
 
 // TWelcome: start → a new wallet's recovery phrase (blurred until revealed, gated by "written
-// down") → arriving (three cards while the starter WBTC is proven) or restore → "You're afloat"
+// down") → arriving (the starter WBTC sinking while it's proven) or restore → "You're afloat"
 // with the first Everyday address. The water rises a little at each step.
 Item {
     id: page
@@ -35,7 +35,7 @@ Item {
 
     Kit.Water {
         id: water
-        level: ({ start: page.introShown ? 0.45 : 0.2, phrase: 0.08, restore: 0.14, arriving: 0.3, ready: 0.34 })[page.step] || 0.2
+        level: ({ start: page.introShown ? 0.45 : 0.2, phrase: 0.08, restore: 0.14, arriving: 0.66, ready: 0.34 })[page.step] || 0.2
         Behavior on height { NumberAnimation { duration: 1000; easing.type: Easing.OutCubic } }
         Repeater {
             model: page.step === "start" ? [0.22, 0.55, 0.8] : []
@@ -57,9 +57,9 @@ Item {
                 }
             }
         }
-        // The start screen's sea: deeper towards the bottom, a few soft rays of light.
+        // The start screen's sea (and arriving's): deeper towards the bottom, a few soft rays of light.
         Rectangle {
-            visible: page.step === "start"
+            visible: page.step === "start" || page.step === "arriving"
             anchors.fill: parent
             gradient: Gradient { GradientStop { position: 0; color: "#000A5BB8" } GradientStop { position: 1; color: "#E6031F4A" } }
         }
@@ -117,7 +117,7 @@ Item {
             y: shore.surface - height - shore.big * 0.55 + 18 * (1 - shore.shown)
             width: page.width - shore.inset * 2
             opacity: shore.shown
-            text: qsTr("Save and borrow\nagainst your crypto,")
+            text: qsTr("Lend and borrow\nagainst your crypto,")
             font.pixelSize: shore.big; font.weight: Font.ExtraBold; font.letterSpacing: -shore.big * 0.03
             lineHeight: 0.98
         }
@@ -238,13 +238,13 @@ Item {
             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.app.welcomeStep = "start" }
         }
         LogosText {
-            text: qsTr("Your %1 lifebuoy words").arg(page.words.length)
+            text: qsTr("Your %1 words").arg(page.words.length)
             font.pixelSize: 40; font.weight: Font.ExtraBold; font.letterSpacing: -40 * 0.035
         }
         LogosText {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
-            text: qsTr("If you lose this computer, these words bring your money back. Anyone who sees them can take it. Write them on paper. We'll show them once.")
+            text: qsTr("Write these words on paper and keep them secret. You need them to get your money back if you lose this computer. Anyone who has them can take your money.")
             font.pixelSize: 16
             color: "#D1FFFFFF"
         }
@@ -343,90 +343,165 @@ Item {
         }
     }
 
-    // Arriving: the starter WBTC is being proven on this computer. Three cards say what comes
-    // next; the wallet opens once it has landed (or at once, by choice).
-    ColumnLayout {
+    // Arriving: the starter WBTC is being proven on this computer. Most of the screen is water:
+    // the coin sinks from the surface as the proof runs (by time; a claim isn't a job, so there are
+    // no stages to show), and lands at the bottom, in the Private account. Above, what the network
+    // sees; below, the clock and what comes next. The wallet opens once it has landed (or at once,
+    // by choice).
+    Item {
         id: arriving
+        anchors.fill: parent
         visible: page.step === "arriving"
-        anchors.horizontalCenter: parent.horizontalCenter
-        y: Math.max(70, parent.height * 0.1)
-        width: Math.min(parent.width - 48, 600)
-        spacing: 18
-        property int card: 0
         property real now: Date.now()
+        onVisibleChanged: now = Date.now()
         readonly property bool failed: !page.app.starterRunning && page.app.starterFailed
         readonly property bool landed: !page.app.starterRunning && !page.app.starterFailed
-        readonly property bool late: !landed && !failed && secs > (page.app.gpu ? 120 : 780)
+        readonly property int expectS: page.app.gpu ? 90 : 600
+        readonly property bool late: !landed && !failed && secs > expectS * 1.4
         readonly property int secs: Math.max(0, Math.round((now - page.app.starterStarted) / 1000))
+        // How far down the coin is: by time, never at the bottom before it lands.
+        readonly property real depth: landed ? 1 : failed ? 0 : Math.min(0.9, secs / expectS * 0.9)
+        readonly property string clock: Math.floor(secs / 60) + ":" + ("0" + secs % 60).slice(-2)
         readonly property string drop: {
             var id = page.app.tokenId("WBTC"), d = page.app.dropOf(id)
             return d ? Units.format(d.amount, page.app.tokenDecimals(id), 4) + " " : ""
         }
-        readonly property var cards: [
-            { title: qsTr("Your money lives below the surface"),
-              body: qsTr("The WBTC lands in your Private account. The network sees that someone claimed some, never who.") },
-            { title: qsTr("Borrow against what you hold"),
-              body: qsTr("Put your WBTC up as collateral and borrow up to 80% of its value in USDC. You keep the WBTC.") },
-            { title: qsTr("Mind the water line"),
-              body: qsTr("If WBTC falls far enough, some of it is sold to pay the loan back. Borrow less and the water stays low.") }
-        ]
+        readonly property real surface: water.y
+        readonly property int margin: Math.max(32, Math.round(width * 0.06))
         Timer { interval: 1000; repeat: true; running: arriving.visible && !arriving.landed; onTriggered: arriving.now = Date.now() }
-        Timer { interval: 7000; repeat: true; running: arriving.visible; onTriggered: arriving.card = (arriving.card + 1) % arriving.cards.length }
 
-        LogosText {
-            text: arriving.landed ? qsTr("Your WBTC is here.") : arriving.failed ? qsTr("That didn't land.") : qsTr("Getting your WBTC…")
-            font.pixelSize: 40; font.weight: Font.ExtraBold; font.letterSpacing: -40 * 0.035
-        }
-        LogosText {
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            font.pixelSize: 15
-            color: "#D1FFFFFF"
-            text: arriving.landed ? qsTr("%1test WBTC, out of sight in your Private account. Next: borrow some USDC against it.").arg(arriving.drop)
-                : arriving.failed ? qsTr("The network didn't take the claim, so nothing moved. Trying again starts a new one.")
-                : arriving.late ? qsTr("Taking longer than usual: %1 so far. It's still proving on this computer; nothing has gone out yet.").arg(Units.ago(arriving.secs * 1000))
-                : qsTr("Your computer is proving the claim, so nobody learns it was you: %1. %2 so far.").arg(page.app.diveTime).arg(Units.ago(arriving.secs * 1000))
-        }
-        Rectangle {
-            objectName: "arrivingCard"
-            Layout.fillWidth: true
-            implicitHeight: cardCol.implicitHeight + 40
-            radius: 22
-            color: "#D10B1424"
-            border.color: "#26FFFFFF"
-            ColumnLayout {
-                id: cardCol
-                x: 22; y: 20
-                width: parent.width - 44
-                spacing: 8
-                LogosText { text: qsTr("%1 of %2").arg(arriving.card + 1).arg(arriving.cards.length); font.pixelSize: 12; font.weight: Font.Bold; color: Tide.text3 }
-                LogosText { Layout.fillWidth: true; wrapMode: Text.Wrap; text: arriving.cards[arriving.card].title; font.pixelSize: 22; font.weight: Font.ExtraBold }
-                LogosText { Layout.fillWidth: true; wrapMode: Text.Wrap; text: arriving.cards[arriving.card].body; font.pixelSize: 15; color: "#D9FFFFFF" }
-            }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: arriving.card = (arriving.card + 1) % arriving.cards.length }
-        }
-        Row {
-            Layout.alignment: Qt.AlignHCenter
-            spacing: 8
-            Repeater {
-                model: arriving.cards.length
-                delegate: Rectangle { width: 8; height: 8; radius: 4; color: index === arriving.card ? "#FFFFFF" : "#40FFFFFF" }
-            }
-        }
-        Row {
-            Layout.alignment: Qt.AlignHCenter
+        // Above the surface: what's happening, and what the network sees.
+        Column {
+            x: arriving.margin
+            width: Math.min(560, arriving.width * 0.5)
+            y: arriving.surface - height - 34
             spacing: 10
-            Kit.BigButton {
-                objectName: "arrivingRetry"
-                visible: arriving.failed
-                text: qsTr("Try again")
-                onClicked: page.app.startStarter()
+            LogosText {
+                text: arriving.landed ? qsTr("Your WBTC is here.") : arriving.failed ? qsTr("That didn't land.") : qsTr("Getting your WBTC")
+                font.pixelSize: 44; font.weight: Font.ExtraBold; font.letterSpacing: -44 * 0.035
             }
-            Kit.BigButton {
-                objectName: "arrivingOpen"
-                outline: !arriving.landed
-                text: arriving.landed || arriving.failed ? qsTr("Open my wallet") : qsTr("Open it now; it'll land there")
-                onClicked: page.app.enterMain()
+            LogosText {
+                width: parent.width
+                wrapMode: Text.Wrap
+                font.pixelSize: 15
+                color: "#D1FFFFFF"
+                text: arriving.landed ? qsTr("%1test WBTC, out of sight in your Private account. Next: borrow some USDC against it.").arg(arriving.drop)
+                    : arriving.failed ? qsTr("The network didn't take the claim, so nothing moved. Trying again starts a new one.")
+                    : qsTr("Your computer is proving the claim, so nobody learns it was you.")
+            }
+        }
+        Column {
+            x: arriving.width - width - arriving.margin
+            y: arriving.surface - height - 38
+            width: Math.min(300, arriving.width * 0.28)
+            spacing: 4
+            LogosText { text: qsTr("Seen from above"); font.pixelSize: 13; font.weight: Font.Bold }
+            LogosText {
+                width: parent.width; wrapMode: Text.Wrap; font.pixelSize: 13; color: Tide.text2
+                text: arriving.landed ? qsTr("Someone claimed %1test WBTC. Not who, and not where it went.").arg(arriving.drop)
+                                      : qsTr("Nothing yet: the proof is made here, before anything is sent.")
+            }
+        }
+
+        // The coin, on its way down a faint line from the surface to the Private account.
+        Item {
+            id: shaft
+            x: Math.round(arriving.width * 0.66); y: arriving.surface + 24
+            width: 64; height: arriving.height - y - 64
+            Rectangle { x: parent.width / 2; width: 1; height: parent.height; color: "#33FFFFFF" }
+            Rectangle { x: parent.width / 2; width: 1; height: coin.y + coin.height / 2; color: "#8CFFFFFF" }
+            Rectangle {
+                id: coin
+                width: 64; height: 64; radius: 32
+                y: (shaft.height - height) * arriving.depth
+                Behavior on y { enabled: arriving.visible; NumberAnimation { duration: 1000; easing.type: Easing.InOutSine } }
+                color: Tide.look("WBTC")[1]
+                border.width: 4; border.color: "#33FFFFFF"
+                LogosText { anchors.centerIn: parent; text: Tide.look("WBTC")[0]; font.pixelSize: 30; font.weight: Font.ExtraBold; color: Tide.look("WBTC")[2] }
+                // Bobbing while it sinks.
+                SequentialAnimation on rotation {
+                    running: arriving.visible && !arriving.landed && !arriving.failed
+                    loops: Animation.Infinite
+                    NumberAnimation { from: -6; to: 6; duration: 1600; easing.type: Easing.InOutSine }
+                    NumberAnimation { from: 6; to: -6; duration: 1600; easing.type: Easing.InOutSine }
+                }
+                Rectangle {
+                    visible: arriving.landed
+                    anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: -4
+                    width: 24; height: 24; radius: 12; color: Tide.good
+                    LogosText { anchors.centerIn: parent; text: "✓"; font.pixelSize: 14; font.weight: Font.ExtraBold; color: Tide.sky }
+                }
+            }
+            LogosText {
+                anchors.left: parent.right; anchors.leftMargin: 14
+                y: coin.y + (coin.height - height) / 2
+                text: arriving.landed ? qsTr("In Private · Main") : arriving.failed ? "" : qsTr("Sinking out of sight")
+                font.pixelSize: 13; font.weight: Font.Bold; color: Tide.text2
+            }
+            LogosText {
+                visible: !arriving.landed
+                anchors.left: parent.right; anchors.leftMargin: 14; anchors.bottom: parent.bottom
+                text: qsTr("Private · Main"); font.pixelSize: 12; color: Tide.text4
+            }
+        }
+
+        // Below: the clock, what comes next, the way out.
+        Column {
+            x: arriving.margin
+            y: arriving.surface + 40
+            width: shaft.x - arriving.margin - 48
+            spacing: 26
+            Row {
+                visible: !arriving.landed && !arriving.failed
+                spacing: 18
+                LogosText { text: arriving.clock; font.pixelSize: 40; font.weight: Font.ExtraBold; font.family: Theme.typography.mono; anchors.verticalCenter: parent.verticalCenter }
+                LogosText {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 300; wrapMode: Text.Wrap; font.pixelSize: 14; color: Tide.text2
+                    text: arriving.late ? qsTr("Taking longer than usual. It's still proving on this computer; nothing has gone out yet.")
+                                        : page.app.gpu ? qsTr("Usually a minute or two on the graphics card, then a few seconds to land.")
+                                                       : qsTr("Usually about 10 minutes on this computer's processor.")
+                }
+            }
+            Column {
+                width: parent.width
+                spacing: 12
+                LogosText { text: qsTr("What comes next"); font.pixelSize: 12; font.weight: Font.Bold; font.capitalization: Font.AllUppercase; color: Tide.text3 }
+                Repeater {
+                    model: [
+                        [qsTr("Borrow against it"), qsTr("Put the WBTC up as collateral and borrow up to 80% of its value in USDC. It stays yours.")],
+                        [qsTr("Mind the water line"), qsTr("If WBTC falls far enough, some is sold to pay the loan back. Borrow less and the water stays low.")],
+                        [qsTr("Lend what you don't need"), qsTr("USDC lent to a market earns what its borrowers pay, and nobody sees it's yours.")]
+                    ]
+                    delegate: Row {
+                        spacing: 14
+                        Rectangle {
+                            width: 26; height: 26; radius: 13; color: "#26FFFFFF"
+                            LogosText { anchors.centerIn: parent; text: index + 1; font.pixelSize: 13; font.weight: Font.ExtraBold }
+                        }
+                        Column {
+                            width: arriving.width * 0.5 - 40 - arriving.margin
+                            spacing: 2
+                            LogosText { text: modelData[0]; font.pixelSize: 16; font.weight: Font.ExtraBold }
+                            LogosText { width: parent.width; wrapMode: Text.Wrap; text: modelData[1]; font.pixelSize: 14; color: "#D9FFFFFF" }
+                        }
+                    }
+                }
+            }
+            Row {
+                spacing: 10
+                Kit.BigButton {
+                    objectName: "arrivingRetry"
+                    visible: arriving.failed
+                    text: qsTr("Try again")
+                    onClicked: page.app.startStarter()
+                }
+                Kit.BigButton {
+                    objectName: "arrivingOpen"
+                    outline: !arriving.landed
+                    text: arriving.landed || arriving.failed ? qsTr("Open my wallet") : qsTr("Open it now; it'll land there")
+                    onClicked: page.app.enterMain()
+                }
             }
         }
     }

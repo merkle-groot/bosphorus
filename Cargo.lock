@@ -1294,6 +1294,7 @@ version = "0.1.0"
 dependencies = [
  "borsh",
  "bosphorus-core",
+ "bosphorus-pool",
  "lee_core",
  "risc0-zkvm",
 ]
@@ -1306,6 +1307,7 @@ dependencies = [
  "bosphorus-core",
  "bosphorus-lending",
  "bosphorus-oracle",
+ "bosphorus-pool",
  "lee_core",
 ]
 
@@ -1396,6 +1398,7 @@ dependencies = [
 name = "bosphorus-test-caller"
 version = "0.1.0"
 dependencies = [
+ "bosphorus-pool",
  "bosphorus-token",
  "lee_core",
 ]

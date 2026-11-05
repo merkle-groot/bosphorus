@@ -10,7 +10,7 @@ import "../kit/tide.js" as Tide
 
 // TDive: a private op being proven, as a coin diving out of sight. Bound to app.dive: a market op's
 // job (progress from its state and how long it has been proving), or a transfer (progress from the
-// time since it started; the call returns when it lands). Proving takes ~1 min on the GPU, ~10 on a
+// time since it started; the call returns when it lands). Proving takes 1–2 min on the GPU, ~10 on a
 // CPU; the estimate never claims to be done before the app says so.
 Rectangle {
     id: dive
@@ -24,7 +24,7 @@ Rectangle {
         return null
     }
     readonly property bool gpu: app.gpu
-    readonly property real expectMs: gpu ? 75000 : 600000
+    readonly property real expectMs: gpu ? 90000 : 600000
     property real now: Date.now()
     Timer { interval: 250; repeat: true; running: dive.visible && !dive.finished; onTriggered: dive.now = Date.now() }
 
@@ -69,7 +69,7 @@ Rectangle {
         anchors.leftMargin: 28; anchors.rightMargin: 28
         height: 70
         LogosText { text: "Bosphorus"; font.pixelSize: 17; font.weight: Font.ExtraBold; Layout.fillWidth: true }
-        LogosText { text: dive.gpu ? qsTr("Diving on the graphics card · about 1 minute") : qsTr("Diving on the processor · about 10 minutes"); font.pixelSize: 13; color: "#D9FFFFFF"; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter }
+        LogosText { text: dive.gpu ? qsTr("Diving on the graphics card · 1–2 minutes") : qsTr("Diving on the processor · about 10 minutes"); font.pixelSize: 13; color: "#D9FFFFFF"; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter }
         Item {
             Layout.fillWidth: true
             implicitHeight: 36

@@ -102,7 +102,7 @@ Item {
                         implicitHeight: 18
                         id: head
                         Repeater {
-                            model: [qsTr("Market"), qsTr("Savers earn"), qsTr("Borrowers pay"), qsTr("Lent out"), qsTr("Free to borrow")]
+                            model: [qsTr("Market"), qsTr("Lenders earn"), qsTr("Borrowers pay"), qsTr("Lent out"), qsTr("Free to borrow")]
                             delegate: LogosText {
                                 x: head.cx(index); width: head.cw(index)
                                 horizontalAlignment: index === 4 ? Text.AlignRight : Text.AlignLeft
@@ -136,7 +136,7 @@ Item {
                                     Column {
                                         anchors.verticalCenter: parent.verticalCenter
                                         LogosText { text: mrow.i.loan + " · " + mrow.i.coll; font.pixelSize: 16; font.weight: Font.ExtraBold }
-                                        LogosText { text: qsTr("Borrow %1 with %2").arg(mrow.i.loan).arg(mrow.i.coll); font.pixelSize: 12; color: "#B3FFFFFF" }
+                                        LogosText { text: mrow.m.pool ? qsTr("Screened money only") : qsTr("Borrow %1 with %2").arg(mrow.i.loan).arg(mrow.i.coll); font.pixelSize: 12; color: mrow.m.pool ? "#FFFFFF" : "#B3FFFFFF"; font.weight: mrow.m.pool ? Font.Bold : Font.Normal }
                                     }
                                 }
                                 LogosText { x: rc.cx(1); anchors.verticalCenter: parent.verticalCenter; text: mrow.i.off ? "–" : page.pct(mrow.m.supply_apr) + "%"; font.pixelSize: 18; font.weight: Font.Bold; color: Tide.good }
@@ -165,7 +165,8 @@ Item {
                                     }
                                 }
                             }
-                            Item { anchors.fill: parent; objectName: "marketRow-" + mrow.i.coll }   // for the guide: the row of one market
+                            // For the guide: the row of the market it uses (`marketFor`; two markets can share a pair).
+                            Item { anchors.fill: parent; objectName: mrow.m.market === page.app.marketFor(mrow.i.coll) ? "marketRow-" + mrow.i.coll : "" }
                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.app.openMarket = mrow.m.market }
                         }
                     }
@@ -201,12 +202,24 @@ Item {
                         Layout.alignment: Qt.AlignTop
                         spacing: 18
                         RowLayout {
+                            Layout.fillWidth: true
                             spacing: 14
                             Pair { a: page.c ? page.c.loan : ""; b: page.c ? page.c.coll : ""; size: 44 }
                             ColumnLayout {
+                                Layout.fillWidth: true
                                 spacing: 0
-                                LogosText { text: page.c ? page.c.loan + " · " + page.c.coll : ""; font.pixelSize: 34; font.weight: Font.ExtraBold; font.letterSpacing: -1 }
-                                LogosText { text: page.c ? qsTr("Savers lend %1. Borrowers put up %2 as collateral.").arg(page.c.loan).arg(page.c.coll) : ""; font.pixelSize: 14; color: "#D1FFFFFF" }
+                                RowLayout {
+                                    spacing: 12
+                                    LogosText { text: page.c ? page.c.loan + " · " + page.c.coll : ""; font.pixelSize: 34; font.weight: Font.ExtraBold; font.letterSpacing: -1 }
+                                    Rectangle {
+                                        visible: !!(page.cur && page.cur.pool)
+                                        implicitHeight: 26; implicitWidth: screenedTag.implicitWidth + 20; radius: 13
+                                        color: "#1FFFFFFF"; border.color: "#40FFFFFF"
+                                        LogosText { id: screenedTag; anchors.centerIn: parent; text: qsTr("Screened"); font.pixelSize: 12; font.weight: Font.Bold }
+                                    }
+                                }
+                                LogosText { Layout.fillWidth: true; wrapMode: Text.Wrap; text: page.c ? qsTr("Lenders put in %1. Borrowers put up %2 as collateral.").arg(page.c.loan).arg(page.c.coll) : ""; font.pixelSize: 14; color: "#D1FFFFFF" }
+                                LogosText { Layout.fillWidth: true; wrapMode: Text.Wrap; visible: !!(page.cur && page.cur.pool); text: qsTr("Only money cleared by the screened pool pays in; what it pays out stays screened."); font.pixelSize: 14; color: "#D1FFFFFF" }
                             }
                         }
                         Rectangle {
@@ -228,7 +241,7 @@ Item {
                             columns: 2
                             columnSpacing: 12
                             Repeater {
-                                model: page.c ? [[qsTr("Savers earn"), page.pct(page.cur.supply_apr), Tide.good, qsTr("a year, on %1").arg(page.c.loan)],
+                                model: page.c ? [[qsTr("Lenders earn"), page.pct(page.cur.supply_apr), Tide.good, qsTr("a year, on %1").arg(page.c.loan)],
                                                  [qsTr("Borrowers pay"), page.pct(page.cur.borrow_apr), "#FFFFFF", qsTr("a year, in %1").arg(page.c.loan)]] : []
                                 delegate: Rectangle {
                                     Layout.fillWidth: true
@@ -276,8 +289,8 @@ Item {
                                 wrapMode: Text.Wrap
                                 font.pixelSize: 12
                                 color: page.c && page.c.full ? "#FFD08A" : "#BFFFFFFF"
-                                text: !page.c ? "" : page.c.full ? qsTr("Nearly full. Savers may have to wait to take money back.")
-                                    : qsTr("Plenty free: savers can take their money back any time.")
+                                text: !page.c ? "" : page.c.full ? qsTr("Nearly full. Lenders may have to wait to take money back.")
+                                    : qsTr("Plenty free: lenders can take their money back any time.")
                             }
                         }
                         LogosText {
@@ -358,7 +371,7 @@ Item {
                                     Layout.fillWidth: true
                                     wrapMode: Text.Wrap
                                     font.pixelSize: 13; color: "#FFEBC7"
-                                    text: qsTr("Too old to trust. Borrowing and taking collateral out wait for a fresh price; saving, taking savings back and paying back still work.")
+                                    text: qsTr("Too old to trust. Borrowing and taking collateral out wait for a fresh price; lending, taking back what you lent and paying back still work.")
                                 }
                             }
                         }
@@ -368,7 +381,7 @@ Item {
                             Layout.fillWidth: true
                             columns: 2
                             columnSpacing: 10
-                            Kit.BigButton { objectName: "marketSave"; Layout.fillWidth: true; Layout.preferredWidth: 1; buttonHeight: 52; outline: true; text: page.c ? qsTr("Save %1").arg(page.c.loan) : ""; onClicked: page.app.openPosition(page.selected, "", "supply") }
+                            Kit.BigButton { objectName: "marketSave"; Layout.fillWidth: true; Layout.preferredWidth: 1; buttonHeight: 52; outline: true; text: page.c ? qsTr("Lend %1").arg(page.c.loan) : ""; onClicked: page.app.openPosition(page.selected, "", "supply") }
                             Kit.BigButton { objectName: "marketBorrow"; Layout.fillWidth: true; Layout.preferredWidth: 1; buttonHeight: 52; text: page.c ? qsTr("Borrow %1").arg(page.c.loan) : ""; onClicked: page.app.openPosition(page.selected, "", "borrow") }
                         }
                         LogosText {

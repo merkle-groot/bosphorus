@@ -87,7 +87,7 @@ a position's health is a water level.
 <td width="50%"><img src="site/img/app-position.png" alt="Position: a private position close to its sell line, shown as red water"></td>
 </tr>
 <tr>
-<td align="center"><sub><b>Markets.</b> What savers earn, what borrowers pay, the sell line and a fresh price.</sub></td>
+<td align="center"><sub><b>Markets.</b> What lenders earn, what borrowers pay, the sell line and a fresh price.</sub></td>
 <td align="center"><sub><b>Position.</b> Health as a water level. This private position is close to its sell line.</sub></td>
 </tr>
 </table>

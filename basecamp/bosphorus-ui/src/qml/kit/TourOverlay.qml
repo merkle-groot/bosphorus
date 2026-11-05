@@ -52,6 +52,9 @@ Item {
         if (item.objectName === name) return item
         var kids = item.children || []
         for (var i = 0; i < kids.length; i++) { var f = find(kids[i], name); if (f) return f }
+        // An open popup's content lives in the window's overlay, not among the children.
+        var data = item.data || []
+        for (var j = 0; j < data.length; j++) if (data[j] && data[j].opened && data[j].contentItem) { var g = find(data[j].contentItem, name); if (g) return g }
         return null
     }
     function measure() {

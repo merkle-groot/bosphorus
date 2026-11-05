@@ -203,6 +203,11 @@ pub enum MarketCmd {
         /// Seconds.
         #[arg(long, default_value_t = 3600)]
         max_price_age: u64,
+        /// A screened market: every inflow is paid from this pool's approved lots, every outflow
+        /// lands as a market lot there (design/screened-markets.md). The pool's bytecode must be
+        /// enabled (`bos lending enable-asset`), and lending registered with it (`bos pool set-market`).
+        #[arg(long)]
+        pool: Option<Holder>,
         #[arg(long)]
         payer: Holder,
     },
@@ -430,7 +435,7 @@ fn describe_irm(irm: &IrmParams) -> String {
 
 pub async fn market(client: &mut Client, cmd: MarketCmd) -> Result<()> {
     match cmd {
-        MarketCmd::Create { lending, loan, collateral, oracle, feed, lltv, irm, max_price_age, payer } => {
+        MarketCmd::Create { lending, loan, collateral, oracle, feed, lltv, irm, max_price_age, pool, payer } => {
             let params = MarketParams {
                 loan_asset: loan.id(),
                 collateral_asset: collateral.id(),
@@ -439,6 +444,7 @@ pub async fn market(client: &mut Client, cmd: MarketCmd) -> Result<()> {
                 irm: irm.params(),
                 lltv,
                 max_price_age: max_price_age * 1000,
+                pool: pool.map(|p| p.id()),
             };
             let id = client.create_market(lending.id(), params, &ClaimConfig::default(), payer.id()).await?;
             println!("{}", market_id_hex(&id));

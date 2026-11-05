@@ -81,7 +81,7 @@ Item {
     readonly property bool stalled: root.online && root.info !== null && root.now - root.blockMovedAt > 120000
     readonly property bool gpu: !!(root.prover && root.prover.gpu)
     // How long a proof takes here, in words.
-    readonly property string diveTime: root.gpu ? qsTr("about a minute") : qsTr("about 10 minutes")
+    readonly property string diveTime: root.gpu ? qsTr("a minute or two") : qsTr("about 10 minutes")
 
     // Navigation: Wallet, Markets, Position, Activity.
     property int tab: 0
@@ -92,7 +92,7 @@ Item {
         if (root.tab === 0 && root.coachGoal !== "" && root.checklist[root.coachGoal === "borrow" ? 1 : 2].done) root.coachGoal = ""
     }
     property string openMarket: ""     // the market Markets shows and Position acts in
-    property string actAs: ""          // the account Position acts as
+    property string actAs: ""          // the account Position acts as: always a private one
     property int slot: 0               // its position index (private accounts)
     property string presetOp: ""       // an op Markets' "Save here" / "Borrow here" asks for
     property string selectedJob: ""
@@ -221,7 +221,21 @@ Item {
         interval: 30000
         repeat: true
         running: root.screen === "main"
-        onTriggered: { root.refreshInfo(); if (root.online) root.refreshMarkets(false) }
+        onTriggered: {
+            root.refreshInfo(autoSync)
+            if (!root.online) return
+            root.refreshMarkets(false)
+            // A pending lot turns approved when the ASP signs, with nothing here to notice it.
+            if (root.pool && root.pool.lots.some(function(l) { return l.state === "pending" })) root.refreshPool()
+        }
+    }
+    // Private balances fall behind as blocks pass (only a sync reads them): catch up in the
+    // background once more than 30 blocks behind, while no job needs the prover.
+    function autoSync() {
+        if (root.weather !== "behind" || root.syncing || root.runningJobs.length > 0) return
+        root.syncing = true
+        call("sync", {}, function() { root.syncing = false; root.lastSyncAt = Date.now(); refreshAll() },
+             function(e) { root.syncing = false; quietly(e) })
     }
     Timer {
         interval: 5000
@@ -412,7 +426,7 @@ Item {
         refreshInfo()
         call("accounts", {}, function(r) {
             root.accounts = r
-            if (root.actAs === "" && r.length > 0) root.actAs = r[0].account
+            if (!Units.isPrivate(root.actAs)) root.actAs = root.privateId
             refreshMarkets(true)
             refreshPool()
             refreshFaucet()
@@ -489,22 +503,45 @@ Item {
         var id = tokenId(symbol), d = dropOf(id)
         return root.online && root.privateId !== "" && !!d && !root.claiming[id] && (d.next_ms === null || d.next_ms <= root.now)
     }
-    // The market lending USDC against `collSym`, "" if none.
+    // The market lending USDC against `collSym`, "" if none: an unscreened one first (the guide's
+    // faucet money is a plain private balance, which a screened market doesn't take).
     function marketFor(collSym) {
-        var id = tokenId(collSym)
-        for (var i = 0; i < root.markets.length; i++) if (root.markets[i].collateral_asset === id) return root.markets[i].market
-        return ""
+        var id = tokenId(collSym), screened = ""
+        for (var i = 0; i < root.markets.length; i++) {
+            var m = root.markets[i]
+            if (m.collateral_asset !== id) continue
+            if (!m.pool) return m.market
+            if (screened === "") screened = m.market
+        }
+        return screened
+    }
+
+    // The collateral of the market the guide lends in: USDC · WETH, else any unscreened USDC market.
+    function lendCollateral() {
+        var usdc = tokenId("USDC"), other = ""
+        for (var i = 0; i < root.markets.length; i++) {
+            var m = root.markets[i], c = tokenSymbol(m.collateral_asset)
+            if (m.loan_asset !== usdc || m.pool) continue
+            if (c === "WETH") return c
+            if (other === "") other = c
+        }
+        return other || "WETH"
     }
 
     // Start invisible: everything below the surface, no LEZ needed (private txs are fee-exempt).
     // The path: WBTC lands privately → borrow USDC against it → save USDC (claimed meanwhile).
+    // A step stays done once done: paying a loan back doesn't un-borrow (a private job of that op
+    // that finished counts too).
     readonly property var checklist: {
         var mine = root.openPositions.filter(function(o) { return Units.isPrivate(o.account) })
         var wbtc = tokenId("WBTC")
+        var did = function(op) {
+            return root.jobs.some(function(j) { var r = j.request || {}; return j.state === "done" && r.op === op && Units.isPrivate(r.owner || r.from || "") })
+        }
         return [
-            { key: "starter", done: root.privateHolds("WBTC") || root.claimedLately(wbtc) || mine.some(function(o) { return o.market.collateral_asset === wbtc && !Units.isZero(o.position.collateral) }) },
-            { key: "borrow", done: mine.some(function(o) { return !Units.isZero(o.position.debt || "0") }) },
-            { key: "save", done: mine.some(function(o) { return !Units.isZero(o.position.supplied_assets || "0") }) }
+            { key: "starter", done: root.privateHolds("WBTC") || root.claimedLately(wbtc) || did("supply_collateral") || mine.some(function(o) { return o.market.collateral_asset === wbtc && !Units.isZero(o.position.collateral) }) },
+            { key: "borrow", done: did("borrow") || mine.some(function(o) { return !Units.isZero(o.position.debt || "0") }) },
+            { key: "save", done: did("supply") || mine.some(function(o) { return !Units.isZero(o.position.supplied_assets || "0") }) }
         ]
     }
     readonly property int checklistDone: root.checklist.filter(function(s) { return s.done }).length
@@ -564,7 +601,7 @@ Item {
 
     // The next-step bar's "Show me" starts it: `coachGoal` "borrow" (all the private WBTC as
     // collateral, then a borrow at health ≈ `healthTarget`) or "save" (the faucet's USDC, in
-    // USDC/WETH); "" when off. Its step follows from what's on screen (tab, market, account, op,
+    // `lendCollateral`'s market); "" when off. Its step follows from what's on screen (tab, market, account, op,
     // amount), so wandering off only changes the hint. The user makes every click; the card's
     // button only types an amount in.
     property string coachGoal: ""
@@ -608,7 +645,7 @@ Item {
     onWantsSaveUsdcChanged: claimForSave()
     function claimForSave() {
         if (!root.wantsSaveUsdc || !canClaim("USDC")) return
-        claimToken("USDC", function(ok) { if (ok) notify(qsTr("USDC to save arrived"), qsTr("In your Private account")) })
+        claimToken("USDC", function(ok) { if (ok) notify(qsTr("USDC to lend arrived"), qsTr("In your Private account")) })
     }
 
     function startCoach(goal) { root.coachGoal = goal; showCoach() }
@@ -619,16 +656,16 @@ Item {
         var goal = root.coachGoal
         if (goal === "" || root.screen !== "main") return null
         var borrow = goal === "borrow"
-        var collSym = borrow ? "WBTC" : "WETH", mk = marketFor(collSym), pair = "USDC · " + collSym
-        var g = borrow ? qsTr("Borrowing privately") : qsTr("Saving privately")
+        var collSym = borrow ? "WBTC" : lendCollateral(), mk = marketFor(collSym), pair = "USDC · " + collSym
+        var g = borrow ? qsTr("Borrowing privately") : qsTr("Lending privately")
         var step = function(title, body, targets, action, act) { return { goal: g, title: title, body: body, targets: targets, action: action || "", act: act || null } }
         if (root.checklist[borrow ? 1 : 2].done) {
             // Borrowed, with the USDC to save already in: on to saving, from here.
             if (borrow && root.hasSaveUsdc)
-                return step(qsTr("Borrowed, out of sight"), qsTr("The USDC is in your Private account, and nobody can see who borrowed it. Some more USDC came in to save: that's next."),
-                            [], qsTr("Next: save USDC"), function() { root.startCoach("save") })
-            return step(borrow ? qsTr("Borrowed, out of sight") : qsTr("Saved, out of sight"),
-                        borrow ? qsTr("The USDC is in your Private account, and nobody can see who borrowed it. Some more USDC to save is on its way; the Wallet shows when it's in.")
+                return step(qsTr("Borrowed, out of sight"), qsTr("The USDC is in your Private account, and nobody can see who borrowed it. Some more USDC came in to lend: that's next."),
+                            [], qsTr("Next: lend USDC"), function() { root.startCoach("save") })
+            return step(borrow ? qsTr("Borrowed, out of sight") : qsTr("Lent, out of sight"),
+                        borrow ? qsTr("The USDC is in your Private account, and nobody can see who borrowed it. Some more USDC to lend is on its way; the Wallet shows when it's in.")
                                : qsTr("Your USDC now earns what borrowers pay, and nobody can see it's yours."),
                         [{ name: "navWallet", label: qsTr("Back to Wallet"), side: "below" }],
                         qsTr("Back to Wallet"), function() { root.coachGoal = ""; root.tab = 0 })
@@ -636,7 +673,7 @@ Item {
         if (root.tab !== 1 && root.tab !== 2)
             return step(qsTr("Open Markets"),
                         borrow ? qsTr("Each market lends one token against another. Borrowing USDC against WBTC happens in USDC · WBTC.")
-                               : qsTr("Savers lend USDC to a market and earn what its borrowers pay. Yours goes to USDC · WETH."),
+                               : qsTr("Lenders put USDC in a market and earn what its borrowers pay. Yours goes to %1.").arg(pair),
                         [{ name: "navMarkets", label: qsTr("Click Markets"), side: "below" }])
         if (root.tab === 1) {
             if (marketsPage.selected !== mk)
@@ -644,25 +681,28 @@ Item {
                             [{ name: "marketRow-" + collSym, label: qsTr("Click this market"), side: "below" }])
             return borrow ? step(qsTr("Borrow from here"), qsTr("You can borrow up to 80% of what your WBTC is worth. Past that line, some WBTC is sold to pay back the loan."),
                                  [{ name: "marketBorrow", label: qsTr("Click Borrow USDC"), side: "below" }, { name: "borrowLimit", label: qsTr("The sell line"), side: "left" }])
-                          : step(qsTr("Save from here"), qsTr("What savers earn moves with how much of the market is lent out."),
-                                 [{ name: "marketSave", label: qsTr("Click Save USDC"), side: "below" }, { name: "marketRates", label: qsTr("What savers earn"), side: "above" }])
+                          : step(qsTr("Lend from here"), qsTr("What lenders earn moves with how much of the market is lent out."),
+                                 [{ name: "marketSave", label: qsTr("Click Lend USDC"), side: "below" }, { name: "marketRates", label: qsTr("What lenders earn"), side: "above" }])
         }
         var P = positionPage
         if (P.working) return null
         if (P.marketId !== mk)
             return step(qsTr("Switch to %1").arg(pair), qsTr("Position acts in one market at a time."),
-                        [{ name: "positionMarket", label: qsTr("Click to change market"), side: "below" }])
+                        P.marketMenuOpen ? [{ name: "positionMarket-" + collSym, label: qsTr("Click %1").arg(pair), side: "right" }]
+                                         : [{ name: "positionMarket", label: qsTr("Click to change market"), side: "below" }])
         if (P.account !== root.privateId)
             return step(qsTr("Act as Private"), borrow ? qsTr("Your WBTC is in your Private account. Acting from it, nobody can see who borrowed: your computer proves it instead.")
-                                                       : qsTr("Your USDC is in your Private account. Saved from there, the market sees new savings, not whose."),
+                                                       : qsTr("Your USDC is in your Private account. Lent from there, the market sees new lending, not whose."),
                         [{ name: "who-private", label: qsTr("Click Private"), side: "below" }])
         var want = borrow ? (Units.isZero(P.coll) ? "supply_collateral" : "borrow") : "supply"
-        if (P.op.op !== want)
+        if (P.sheet && P.op.op !== want)
+            return step(qsTr("Not this one"), qsTr("Close this panel to pick another action."), [{ name: "positionClose", label: qsTr("Click to close"), side: "below" }])
+        if (!P.sheet)
             return want === "supply_collateral" ? step(qsTr("First, put up your WBTC"), qsTr("A loan needs collateral. The WBTC stays yours; the market holds it while you owe."),
-                                                       [{ name: "op-supply_collateral", label: qsTr("Click Add"), side: "below" }])
+                                                       [{ name: "op-supply_collateral", label: qsTr("Click Add WBTC"), side: "above" }])
                  : want === "borrow" ? step(qsTr("Now the loan"), qsTr("Your WBTC is in. Now borrow USDC against it."),
-                                            [{ name: "op-borrow", label: qsTr("Click Borrow"), side: "below" }])
-                 : step(qsTr("Save"), qsTr("Saving lends your USDC to borrowers."), [{ name: "op-supply", label: qsTr("Click Save"), side: "below" }])
+                                            [{ name: "op-borrow", label: qsTr("Click Borrow USDC"), side: "above" }])
+                 : step(qsTr("Lend"), qsTr("Your USDC goes to borrowers, who pay you for it."), [{ name: "op-supply", label: qsTr("Click Lend USDC"), side: "above" }])
         if (!P.useAll && Units.isZero(P.amount)) {
             var raw = want === "supply_collateral" ? String(tokenBalance(root.privateId, tokenId("WBTC")) || "0") : want === "borrow" ? suggestedBorrow() : suggestedSave()
             var sym = want === "supply_collateral" ? "WBTC" : "USDC", has = !Units.isZero(raw)
@@ -671,12 +711,12 @@ Item {
             if (want === "supply_collateral") return step(qsTr("How much WBTC"), qsTr("All of it. More collateral means more room before any is sold."), box, use, fill)
             if (want === "borrow") return step(qsTr("How much USDC"), has ? qsTr("We suggest %1: WBTC could fall about %2% before any is sold.").arg(amountOf(raw, "USDC")).arg(root.fallPct)
                                                                          : qsTr("Waiting for the WBTC price…"), box, use, fill)
-            return step(qsTr("How much to save"), qsTr("The faucet's USDC. What you borrowed stays yours to spend."), box, use, fill)
+            return step(qsTr("How much to lend"), qsTr("The faucet's USDC. What you borrowed stays yours to spend."), box, use, fill)
         }
         var go = [{ name: "positionGo", label: qsTr("Click to dive"), side: "above" }]
         if (want === "supply_collateral") return step(qsTr("Dive"), qsTr("Your computer proves it, %1. The network sees WBTC come in, not whose.").arg(root.diveTime), go)
         if (want === "borrow") return step(qsTr("Watch the water, then dive"), qsTr("The dashed line shows where your debt would take the water; the top line is where some WBTC would be sold. Proving takes %1.").arg(root.diveTime), go)
-        return step(qsTr("Dive"), qsTr("Your computer proves it, %1. The market sees new savings, not whose.").arg(root.diveTime), go)
+        return step(qsTr("Dive"), qsTr("Your computer proves it, %1. The market sees new lending, not whose.").arg(root.diveTime), go)
     }
     // On screen unless a dive or the tour is.
     function showCoach() {
@@ -768,6 +808,16 @@ Item {
         return null
     }
 
+    // What can pay `token` into `market` from `account`: the token balance, or for a screened market
+    // the screened lots (approved and market lots). null: unknown.
+    function payable(market, account, token) {
+        var b = root.balances[market + "|" + account]
+        if (!b || !b.screened) return tokenBalance(account, token)
+        if (b.loan_asset === token) return b.loan_screened
+        if (b.collateral_asset === token) return b.collateral_screened
+        return null
+    }
+
     function accountPositions(market, account) { return root.positions[market + "|" + account] || [] }
 
     function hasAnything(p) { return !Units.isZero(p.supply_shares) || !Units.isZero(p.collateral) || !Units.isZero(p.borrow_shares) }
@@ -788,7 +838,7 @@ Item {
     // Markets → Position: act in `marketId`, optionally as `account`, starting on `op`.
     function openPosition(marketId, account, op) {
         if (marketId) root.openMarket = marketId
-        if (account) root.actAs = account
+        if (account && Units.isPrivate(account)) root.actAs = account
         root.presetOp = op || ""
         root.tab = 2
     }
@@ -1025,7 +1075,7 @@ Item {
         scope: root
         onStepShown: function(step) {
             if (!step) return
-            if (step.setup === "position") root.openPosition(root.marketFor("WBTC") || (root.markets.length > 0 ? root.markets[0].market : ""), root.privateId || root.everydayId, "borrow")
+            if (step.setup === "position") { root.openPosition(root.marketFor("WBTC") || (root.markets.length > 0 ? root.markets[0].market : ""), root.privateId, ""); positionPage.close() }
             root.showSellLine = step.setup === "position"
             root.tab = step.tab
         }

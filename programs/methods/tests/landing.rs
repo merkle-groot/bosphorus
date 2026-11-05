@@ -71,7 +71,7 @@ fn base() -> (World, common::private::PrivateAccount) {
     let mut owner = w.chain.private_account(Keys::new(70), &[(w.tka, encode_balance(OWNER_COLLATERAL))]);
     let m = w.accounts();
     let position = position_id(&w.lending, &w.params.id(), &owner.keys.id(), &SALT);
-    let ix = Instruction::SupplyCollateral { params: w.params.clone(), assets: OWNER_COLLATERAL };
+    let ix = Instruction::SupplyCollateral { params: w.params.clone(), assets: OWNER_COLLATERAL, funding: None };
     let deps = [(w.tka, TOKEN_ELF), (w.tkb, TOKEN_ELF)];
     let witness = owner.witness(&w.chain, true);
     let selectors = vec![(position, w.lending), (owner.keys.id(), w.tka), (m.collateral_vault, w.tka)];

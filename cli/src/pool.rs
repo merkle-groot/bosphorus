@@ -58,7 +58,7 @@ pub enum PoolCmd {
         #[arg(long)]
         label: String,
     },
-    /// A private account's lots: "label asset amount approved|pending".
+    /// A private account's lots: "label asset amount approved|pending|market".
     Lots {
         #[arg(long)]
         pool: Holder,
@@ -104,7 +104,21 @@ pub enum PoolCmd {
         #[arg(long)]
         payer: Option<Holder>,
     },
-    /// The ASP, the accepted roots and the approved count.
+    /// Let a lending instance pay its screened markets' outflows into market lots (signed by the
+    /// ASP); `--off` stops it.
+    SetMarket {
+        #[arg(long)]
+        pool: Holder,
+        #[arg(long)]
+        asp: Holder,
+        #[arg(long)]
+        lending: Holder,
+        #[arg(long)]
+        off: bool,
+        #[arg(long)]
+        payer: Option<Holder>,
+    },
+    /// The ASP, the accepted roots, the approved count and the registered lending instances.
     Info {
         #[arg(long)]
         pool: Holder,
@@ -204,11 +218,17 @@ pub async fn run(client: &mut Client, cmd: PoolCmd) -> Result<()> {
             let labels = labels.iter().map(|l| parse_label(l)).collect::<Result<Vec<_>>>()?;
             client.pool_remove(pool.id(), asp.id(), &labels, payer.map(Holder::id)).await?;
         }
+        PoolCmd::SetMarket { pool, asp, lending, off, payer } => {
+            client.pool_set_market(pool.id(), asp.id(), lending.id(), !off, payer.map(Holder::id)).await?;
+        }
         PoolCmd::Info { pool } => {
             let config = client.pool_config(pool.id()).await?;
             println!("asp {}", Holder::Public(config.asp));
             println!("roots {}", config.roots.len());
             println!("approved {}", client.pool_approved(pool.id()).await?.labels().count());
+            for lending in &config.markets {
+                println!("market {}", Holder::Public(*lending));
+            }
         }
     }
     Ok(())

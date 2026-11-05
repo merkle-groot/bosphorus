@@ -4,8 +4,8 @@
 
 use bosphorus_provenance::{MAX_REMOVE, MAX_SPENDS, push_root, verify};
 use bosphorus_pool::{
-    Config, DepositRecord, Effect, Instruction, Label, Lot, Lots, Shard, approved_id, config_id, decode_lots, deposit_label,
-    encode_lots, escrow_id, escrow_seed, record_id, sha256, transfer,
+    Config, DepositRecord, Effect, Instruction, Label, Lot, Lots, MAX_MARKETS, Shard, approved_id, config_id, decode_lots,
+    deposit_label, encode_lots, escrow_id, escrow_seed, market_label, record_id, sha256, transfer,
 };
 use lee_core::{
     account::AccountId,
@@ -31,7 +31,7 @@ fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             assert!(instance.is_authorized, "the header account must sign init");
             assert_eq!(config.account_id, config_id(this), "wrong config account");
             assert_eq!(approved.account_id, approved_id(this), "wrong approved account");
-            plan.effect(config, &Effect::Init(Config { asp, roots: vec![] }));
+            plan.effect(config, &Effect::Init(Config { asp, roots: vec![], markets: vec![] }));
             plan.effect(approved, &Effect::InitApproved);
         }
         Instruction::Approve { labels, root } => {
@@ -67,14 +67,23 @@ fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             assert_eq!(escrow.account_id, escrow_id(this, &asset), "wrong escrow");
             assert!(!spends.is_empty() && spends.len() <= MAX_SPENDS, "spend 1 to {MAX_SPENDS} lots");
             let mut total: u128 = 0;
+            let mut proved = false;
             for spend in &spends {
                 assert!(spend.amount > 0, "zero amount");
-                ok(verify(sha256, &spend.label, &spend.path, &root));
+                match &spend.path {
+                    Some(path) => {
+                        ok(verify(sha256, &spend.label, path, &root));
+                        proved = true;
+                    }
+                    None => assert_eq!(spend.label, market_label(&asset), "only the market lot spends without a path"),
+                }
                 total = total.checked_add(spend.amount).expect("amount overflow");
             }
             let spends = spends.into_iter().map(|s| (s.label, s.amount)).collect();
             plan.effect(holder, &Effect::Debit { asset, spends });
-            plan.effect(config, &Effect::CheckRoot { root });
+            if proved {
+                plan.effect(config, &Effect::CheckRoot { root });
+            }
             plan.call(transfer(asset, escrow.account_id, to.account_id, total, Some(escrow_seed(&asset))));
         }
         Instruction::Ragequit { asset, label, amount } => {
@@ -85,10 +94,29 @@ fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             assert!(holder.is_authorized, "holder must sign");
             assert!(amount > 0, "zero amount");
             assert_eq!(record.account_id, record_id(this, &label), "record is not this label's");
+            assert_ne!(label, market_label(&asset), "a market lot has no depositor");
             assert_eq!(escrow.account_id, escrow_id(this, &asset), "wrong escrow");
             plan.effect(record, &Effect::Exit { depositor: depositor.account_id, asset });
             plan.effect(holder, &Effect::Take(Lot { asset: *asset.value(), label, amount }));
             plan.call(transfer(asset, escrow.account_id, depositor.account_id, amount, Some(escrow_seed(&asset))));
+        }
+        Instruction::SetMarket { lending, registered } => {
+            let [asp, config] = accounts else { panic!("takes [asp, config]") };
+            assert!(asp.is_authorized, "ASP must sign");
+            assert_eq!(config.account_id, config_id(this), "wrong config account");
+            plan.effect(config, &Effect::SetMarket { signer: asp.account_id, lending, registered });
+        }
+        Instruction::Pay { asset, amount } => {
+            let [vault, config, holder, escrow] = accounts else { panic!("takes [vault, config, holder, escrow]") };
+            let caller = input.caller_account_id.expect("only a lending instance pays");
+            assert!(vault.is_authorized, "vault must sign");
+            assert!(amount > 0, "zero amount");
+            assert_eq!(config.account_id, config_id(this), "wrong config account");
+            assert_eq!(escrow.account_id, escrow_id(this, &asset), "wrong escrow");
+            plan.effect(config, &Effect::CheckMarket { caller });
+            plan.effect(holder, &Effect::Merge(Lot { asset: *asset.value(), label: market_label(&asset), amount }));
+            // The vault is authorised by the caller's PDA grant, which reaches this transfer.
+            plan.call(transfer(asset, vault.account_id, escrow.account_id, amount, None));
         }
     }
     plan
@@ -179,6 +207,29 @@ fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
             for (label, amount) in spends {
                 ok(lots.debit(asset.value(), &label, amount));
             }
+            Some(encode_lots(lots))
+        }
+        Effect::SetMarket { signer, lending, registered } => {
+            let mut config = config(pre_data);
+            assert_eq!(signer, config.asp, "not the ASP");
+            let known = config.markets.contains(&lending);
+            if registered {
+                assert!(!known, "already registered");
+                assert!(config.markets.len() < MAX_MARKETS, "too many markets");
+                config.markets.push(lending);
+            } else {
+                assert!(known, "not registered");
+                config.markets.retain(|m| *m != lending);
+            }
+            encode(Shard::Config(config))
+        }
+        Effect::CheckMarket { caller } => {
+            assert!(config(pre_data).markets.contains(&caller), "caller isn't a registered lending instance");
+            None
+        }
+        Effect::Merge(lot) => {
+            let mut lots = lots(pre_data);
+            ok(lots.merge(lot));
             Some(encode_lots(lots))
         }
         Effect::Take(lot) => {

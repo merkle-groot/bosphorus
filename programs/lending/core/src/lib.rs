@@ -6,6 +6,10 @@
 //! `plan` can't read state, so every market op carries the full [`MarketParams`]: the market's PDA
 //! is derived from their hash, which authenticates them. Values in other shards are claimed as
 //! intervals and checked by each shard's `apply` (constraints §6).
+//!
+//! A *screened* market (`params.pool` set, `design/screened-markets.md`) takes every inflow from
+//! the payer's approved lots in that pool, in the same tx (the pool's `Withdraw` into the vault),
+//! and pays every outflow into the recipient's market lot there (the pool's `Pay`).
 
 use borsh::{BorshDeserialize, BorshSerialize};
 pub use bosphorus_core::{
@@ -42,6 +46,8 @@ pub struct MarketParams {
     pub lltv: u128,
     /// ms. Checked against the end of each tx's validity window.
     pub max_price_age: u64,
+    /// A screened market's pool instance (`bosphorus_pool`): inflows from its lots, outflows into them.
+    pub pool: Option<AccountId>,
 }
 
 impl MarketParams {
@@ -49,17 +55,31 @@ impl MarketParams {
         sha256(&borsh::to_vec(self).expect("borsh serialization is infallible"))
     }
 
-    /// The assets whose bytecode `create_market` checks: loan then collateral, without the native
-    /// token (built in) and without repeats. Each needs its header account in the tx.
+    /// The programs whose bytecode `create_market` checks: loan then collateral, without the
+    /// native token (built in) and without repeats, then the pool if screened (it moves the
+    /// vaults' tokens, so it's trusted like a token). Each needs its header account in the tx.
     pub fn checked_assets(&self) -> Vec<AccountId> {
         let mut assets = vec![];
-        for asset in [self.loan_asset, self.collateral_asset] {
+        for asset in [Some(self.loan_asset), Some(self.collateral_asset), self.pool].into_iter().flatten() {
             if asset != NATIVE_TOKEN_PROGRAM_ID && !assets.contains(&asset) {
                 assets.push(asset);
             }
         }
         assets
     }
+
+    /// The pool accounts a screened op lists after its usual ones, for `asset`: `[pool_config, escrow]`.
+    pub fn pool_accounts(&self, asset: &AccountId) -> Option<[AccountId; 2]> {
+        self.pool.map(|pool| [bosphorus_pool::config_id(&pool), bosphorus_pool::escrow_id(&pool, asset)])
+    }
+}
+
+/// How a screened market's inflow is paid: lots of the payer's in the market's pool, summing to the
+/// op's amount exactly, under `root` (`bosphorus_pool::Instruction::Withdraw`).
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct Funding {
+    pub spends: Vec<bosphorus_pool::Spend>,
+    pub root: bosphorus_pool::Hash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -101,6 +121,11 @@ pub struct HealthClaim {
 
 /// Account layouts are in each variant's doc; `(to)` is optional and defaults to the owner.
 /// "Signs" means `is_authorized`: a signer, a private account with its `ask`, or a PDA.
+///
+/// Screened markets: every op that moves tokens lists `[pool_config, escrow]` after its usual
+/// accounts (`MarketParams::pool_accounts`, the escrow of the asset moved; `Liquidate` lists the
+/// loan escrow, then the collateral escrow). Inflows need `funding` (exactly when screened); the
+/// payer spends its lots. Outflows credit `to`'s market lot.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Instruction {
     /// `[instance (this program's header, signs), config]`. Only the header's key can initialise.
@@ -120,13 +145,13 @@ pub enum Instruction {
     CreateMarket { params: MarketParams, window: Window, images: Vec<ImageId> },
     /// `[market, position, payer (signs), loan_vault]`. On behalf of any position, or into any
     /// account: a lender may hold its shares in its own (private) account (E9).
-    Supply { params: MarketParams, assets: u128, rs: Interval<u128>, window: Window },
+    Supply { params: MarketParams, assets: u128, rs: Interval<u128>, window: Window, funding: Option<Funding> },
     /// `[owner (signs), market, position, loan_vault, (to)]`. `position` may be the owner's own
     /// account (shares held there, E9; `salt` unused).
     Withdraw { params: MarketParams, shares: u128, salt: Salt, rs: Interval<u128>, window: Window },
     /// `[position, payer (signs), collateral_vault]`. On behalf of any position; the market isn't
     /// touched, so the client checks it exists.
-    SupplyCollateral { params: MarketParams, assets: u128 },
+    SupplyCollateral { params: MarketParams, assets: u128, funding: Option<Funding> },
     /// With `health`: `[owner (signs), market, position, feed, collateral_vault, (to)]`.
     /// Without: `[owner (signs), position, collateral_vault, (to)]`, and the position must hold no
     /// debt (so a dead oracle can't lock debt-free collateral). `position` may be the owner's own account.
@@ -136,7 +161,7 @@ pub enum Instruction {
     /// `[market, position, payer (signs), loan_vault]`. On behalf of any position. Pays
     /// `⌈shares · rb.hi⌉`; the overpayment (the claim's width and projected interest) lowers the
     /// market's borrow assets, and once those reach zero it sits unowned in the loan vault.
-    Repay { params: MarketParams, shares: u128, rb: Interval<u128>, window: Window },
+    Repay { params: MarketParams, shares: u128, rb: Interval<u128>, window: Window, funding: Option<Funding> },
     /// `[liquidator (signs), market, position, feed, loan_vault, collateral_vault, (to)]`.
     /// Permissionless. `claimed` must be the position's exact contents; it must be unhealthy at
     /// `(price.hi, rb.lo)`. The liquidator pays the repaid assets and receives the seized collateral.
@@ -147,6 +172,7 @@ pub enum Instruction {
         price: Interval<U256>,
         rb: Interval<u128>,
         window: Window,
+        funding: Option<Funding>,
     },
     /// `[config, market, recipient_position]`. Permissionless: moves `shares` of the market's
     /// pending fee shares into the fee recipient's (zero-salt) position; the config checks
@@ -309,6 +335,32 @@ pub fn config_id(lending: &AccountId) -> AccountId {
 
 pub fn position_id(lending: &AccountId, market_id: &MarketId, owner: &AccountId, salt: &Salt) -> AccountId {
     AccountId::for_public_pda(lending, &position_seed(market_id, owner, salt))
+}
+
+/// A screened inflow: the pool's `Withdraw` of `funding` from `payer`'s lots into `vault`.
+pub fn pool_withdraw(pool: AccountId, asset: AccountId, payer: AccountId, accounts: [AccountId; 2], vault: AccountId, funding: Funding) -> ChainedCall {
+    let [config, escrow] = accounts;
+    let selectors = vec![
+        ProgramShardSelector::new(payer, pool),
+        ProgramShardSelector::new(config, pool),
+        ProgramShardSelector::new(escrow, asset),
+        ProgramShardSelector::new(vault, asset),
+    ];
+    let Funding { spends, root } = funding;
+    ChainedCall::new(pool, selectors, &bosphorus_pool::Instruction::Withdraw { asset, spends, root })
+}
+
+/// A screened outflow: the pool's `Pay` of `amount` from `vault` (authorised by `seed`) into `to`'s
+/// market lot.
+pub fn pool_pay(pool: AccountId, asset: AccountId, vault: AccountId, seed: PdaSeed, accounts: [AccountId; 2], to: AccountId, amount: u128) -> ChainedCall {
+    let [config, escrow] = accounts;
+    let selectors = vec![
+        ProgramShardSelector::new(vault, asset),
+        ProgramShardSelector::new(config, pool),
+        ProgramShardSelector::new(to, pool),
+        ProgramShardSelector::new(escrow, asset),
+    ];
+    ChainedCall::new(pool, selectors, &bosphorus_pool::Instruction::Pay { asset, amount }).with_pda_seeds(vec![seed])
 }
 
 /// A chained `Transfer` of `asset` (native or a token instance: same instruction bytes, design

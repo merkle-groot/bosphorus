@@ -120,7 +120,7 @@ fn held_supply(p: &mut Private, assets: u128) -> u128 {
     let (l, m, lender, tkb) = (p.w.lending, p.w.accounts(), p.owner.keys.id(), p.w.tkb);
     let rs = p.w.ratios().0;
     let shares = claims::supply_shares(assets, &rs).unwrap();
-    let ix = Instruction::Supply { params: p.w.params.clone(), assets, rs, window: p.w.window() };
+    let ix = Instruction::Supply { params: p.w.params.clone(), assets, rs, window: p.w.window(), funding: None };
     let tx = p.op("held_supply", vec![(m.market, l), (lender, l), (lender, tkb), (m.loan_vault, tkb)], ix).unwrap();
     let (market, tkb_before) = (p.w.params.id(), p.balance(tkb));
     p.owner.advance(&tx, |a| {
@@ -171,7 +171,7 @@ fn lifecycle(p: &mut Private) {
     let (tka, tkb, params) = (p.w.tka, p.w.tkb, p.w.params.clone());
 
     // Open: supply collateral from the private account.
-    let ix = Instruction::SupplyCollateral { params: params.clone(), assets: COLLATERAL };
+    let ix = Instruction::SupplyCollateral { params: params.clone(), assets: COLLATERAL, funding: None };
     let tx = p.op("supply_collateral", vec![(p.position, l), (owner, tka), (m.collateral_vault, tka)], ix).unwrap();
     p.owner.advance(&tx, |a| a.data.set_shard(tka, encode_balance(0)));
     let position = p.w.chain.shard(p.position, l);
@@ -194,7 +194,7 @@ fn lifecycle(p: &mut Private) {
     let rb = Interval { lo: 0, hi: rb.hi };
     let repaid = claims::repay_assets(shares, &rb).unwrap();
     assert!(repaid > BORROWED, "interest accrued");
-    let ix = Instruction::Repay { params: params.clone(), shares, rb, window: p.w.window() };
+    let ix = Instruction::Repay { params: params.clone(), shares, rb, window: p.w.window(), funding: None };
     let tx = p.op("repay", vec![(m.market, l), (p.position, l), (owner, tkb), (m.loan_vault, tkb)], ix).unwrap();
     let tkb_before = p.balance(tkb);
     p.owner.advance(&tx, |a| a.data.set_shard(tkb, encode_balance(tkb_before - repaid)));
@@ -220,7 +220,7 @@ fn a_private_owner_must_authorise_and_own_the_salt() {
     let mut p = private_world();
     let (l, m, owner) = (p.w.lending, p.w.accounts(), p.owner.keys.id());
     let (tka, tkb, params) = (p.w.tka, p.w.tkb, p.w.params.clone());
-    let ix = Instruction::SupplyCollateral { params: params.clone(), assets: COLLATERAL };
+    let ix = Instruction::SupplyCollateral { params: params.clone(), assets: COLLATERAL, funding: None };
     let tx = p.op("supply_collateral", vec![(p.position, l), (owner, tka), (m.collateral_vault, tka)], ix).unwrap();
     p.owner.advance(&tx, |a| a.data.set_shard(tka, encode_balance(0)));
 
@@ -247,6 +247,70 @@ fn a_private_lender_holds_its_shares_without_a_public_trace() {
     require_dev_mode();
     let mut p = private_lender();
     held_lifecycle(&mut p);
+}
+
+/// Held lending in more than one market: the lender's Main account supplies into a fresh private
+/// sub-account (created by this tx, no key needed), which holds the shares; the sub-account later
+/// withdraws them back to Main. Nothing public names either account, and no program change.
+#[test]
+fn a_private_lender_holds_shares_on_a_sub_account() {
+    require_dev_mode();
+    let mut p = private_world();
+    let (l, m, tkb, market) = (p.w.lending, p.w.accounts(), p.w.tkb, p.w.params.id());
+    let main = p.owner.keys.id();
+    let keys = Keys::new(61);
+    let id = keys.id();
+    let mut sub = PrivateAccount { keys, account: lee::Account { nonce: lee_core::account::Nonce::private_account_nonce_init(&id), ..lee::Account::default() } };
+    let deps = [(p.w.tka, TOKEN_ELF), (tkb, TOKEN_ELF)];
+    let secrets: Vec<_> = p.owner.keys.identifying_bytes().into_iter().chain(sub.keys.identifying_bytes()).collect();
+    let market_only = |tx: &PrivacyPreservingTransaction| {
+        let public: Vec<_> = tx.message.public_actions.iter().map(|a| a.account_id).collect();
+        assert!(public.iter().all(|a| [m.market, m.loan_vault].contains(a)), "touched {public:?}");
+        let bytes = borsh::to_vec(tx).unwrap();
+        for (secret, needle) in &secrets {
+            assert!(!contains(&bytes, needle), "{secret} published");
+        }
+    };
+
+    // Supply: Main pays, the new sub-account holds the position.
+    let assets = 100_000;
+    let rs = p.w.ratios().0;
+    let shares = claims::supply_shares(assets, &rs).unwrap();
+    let ix = Instruction::Supply { params: p.w.params.clone(), assets, rs, window: p.w.window(), funding: None };
+    let init = lee_core::PrivateWitness {
+        vpk: sub.keys.vpk(),
+        random_seed: [9; 32],
+        identifier: lee_core::Identifier::ZERO,
+        kind: lee_core::WitnessKind::Regular { ask: None },
+        nullifier: NullifierWitness::Init { npk: sub.keys.npk(), commitment_root: p.w.chain.state.commitment_set_digest() },
+    };
+    let selectors = vec![(m.market, l), (id, l), (main, tkb), (m.loan_vault, tkb)];
+    let tx = p.w.chain.prove(l, LENDING_ELF, &deps, selectors, vec![p.owner.witness(&p.w.chain, true), init], ix).unwrap();
+    p.w.chain.settle(&tx).unwrap();
+    market_only(&tx);
+    let tkb_before = p.balance(tkb);
+    p.owner.advance(&tx, |a| a.data.set_shard(tkb, encode_balance(tkb_before - assets)));
+    // Created by this tx: its nonce stays the initial one (LEZ `output.rs`), no increment.
+    sub.account.data.set_shard(l, held(market, shares, 0));
+    assert!(tx.message.commitments().contains(&lee_core::Commitment::new(&id, &sub.account)), "the sub-account holds the shares");
+
+    // A day of interest, then the sub-account withdraws everything to Main.
+    p.w.supply_collateral(ALICE, p.w.position_of(ALICE), 1_000_000).unwrap();
+    p.w.borrow(ALICE, 1_000_000).unwrap();
+    p.w.chain.now += 24 * 3_600_000;
+    p.w.publish("2.5");
+    let rs = p.w.ratios().0;
+    let out = claims::withdraw_assets(shares, &rs).unwrap();
+    assert!(out > assets, "interest accrued");
+    let ix = Instruction::Withdraw { params: p.w.params.clone(), shares, salt: [0; 32], rs, window: p.w.window() };
+    let selectors = vec![(id, tkb), (m.market, l), (id, l), (m.loan_vault, tkb), (main, tkb)];
+    let witnesses = vec![sub.witness(&p.w.chain, true), p.owner.witness(&p.w.chain, false)];
+    let tx = p.w.chain.prove(l, LENDING_ELF, &deps, selectors.clone(), witnesses, ix.clone()).unwrap();
+    p.w.chain.settle(&tx).unwrap();
+    market_only(&tx);
+    let tkb_before = p.balance(tkb);
+    p.owner.advance(&tx, |a| a.data.set_shard(tkb, encode_balance(tkb_before + out)));
+    sub.advance(&tx, |a| a.data.set_shard(l, held(market, 0, 0)));
 }
 
 /// E9's money-safety and authorisation: only the holder withdraws held shares, it can't inflate
@@ -279,7 +343,7 @@ fn held_shares_answer_only_to_their_holder() {
     assert!(settled.is_err(), "inflated held shares were withdrawn");
 
     // Collateral can sit on a held account, but can't be borrowed against.
-    let ix = Instruction::SupplyCollateral { params: params.clone(), assets: COLLATERAL };
+    let ix = Instruction::SupplyCollateral { params: params.clone(), assets: COLLATERAL, funding: None };
     let tx = p.op("held_supply_collateral", vec![(lender, l), (lender, tka), (m.collateral_vault, tka)], ix).unwrap();
     p.owner.advance(&tx, |a| {
         a.data.set_shard(tka, encode_balance(0));

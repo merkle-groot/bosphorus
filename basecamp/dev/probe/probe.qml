@@ -69,11 +69,11 @@ Window {
         [function() { view.item.openMarket = Fake.MARKET2 }, "coach-borrow-3-button"],
         [function() { view.item.openPosition(Fake.MARKET2, Fake.PUB, "borrow") }, "coach-borrow-4-private"],
         [function() { view.item.actAs = Fake.PRIV }, "coach-borrow-5-add"],
-        [function() { probe.find(view.item, "positionPage").opIndex = 2 }, "coach-borrow-6-amount"],
+        [function() { probe.find(view.item, "positionPage").open(2) }, "coach-borrow-6-amount"],
         [function() { probe.find(view.item, "coach").step.act() }, "coach-borrow-7-go"],
         [function() { probe.find(view.item, "positionPage").submit() }, "coach-borrow-8-dive"],
         [function() { view.item.dive = null; view.item.refreshAll() }, "coach-borrow-9-op"],
-        [function() { probe.find(view.item, "positionPage").opIndex = 4 }, "coach-borrow-10-amount"],
+        [function() { probe.find(view.item, "positionPage").open(4) }, "coach-borrow-10-amount"],
         [function() { probe.find(view.item, "coach").step.act() }, "coach-borrow-11-go"],
         [function() { probe.find(view.item, "positionPage").submit() }, "coach-borrow-12-dive"],
         [function() { view.item.dive = null; view.item.refreshAll() }, "coach-borrow-13-done"],
@@ -98,18 +98,22 @@ Window {
         [function() { view.item.tab = 0 }, "wallet"],
         [function() { var w = probe.find(view.item, "walletPage"); w.open("dive", "above", w.aboveRows[0]); probe.find(view.item, "moveAmount").text = "25000" }, "wallet-dive-sheet"],
         [function() { var w = probe.find(view.item, "walletPage"); w.open("send", "above", w.aboveRows[1]); probe.find(view.item, "moveAmount").text = "5" }, "wallet-send-over"],
-        [function() { var w = probe.find(view.item, "walletPage"); w.open("surface", "below", w.belowRows[w.belowRows.length - 1]); probe.find(view.item, "moveAmount").text = "1000" }, "wallet-surface-sheet"],
+        [function() { var w = probe.find(view.item, "walletPage"); w.openBelow("surface", w.belowRows[w.belowRows.length - 1]); probe.find(view.item, "moveAmount").text = "1000" }, "wallet-surface-sheet"],
         [function() { probe.closePopups() }, "wallet-screened"],
-        [function() { var w = probe.find(view.item, "walletPage"); w.open("dive", "above", w.aboveRows[w.aboveRows.length - 1]); probe.find(view.item, "moveAmount").text = "1000000" }, "wallet-dive-screened"],
-        [function() { var w = probe.find(view.item, "walletPage"); w.open("surface", "below", w.belowScreened[1]); probe.find(view.item, "moveAmount").text = "2500" }, "wallet-surface-screened"],
+        [function() { var w = probe.find(view.item, "walletPage"); w.open("dive", "above", w.aboveLez); probe.find(view.item, "moveAmount").text = "1000000" }, "wallet-dive-screened"],
+        [function() { var w = probe.find(view.item, "walletPage"); w.open("surface", "below", w.belowScreened[1], w.belowOf(w.belowScreened[1].token)); probe.find(view.item, "moveAmount").text = "2500" }, "wallet-surface-screened"],
         [function() { var w = probe.find(view.item, "walletPage"); w.open("takeback", "below", w.belowScreened[2]) }, "wallet-takeback"],
+        [function() { var w = probe.find(view.item, "walletPage"); var a = w.belowScreened[1]; var p = Object.assign({}, a, { raw: "1500000000", screened: undefined }); w.open("send", "below", p, { plain: p, approved: a, pending: [] }) }, "wallet-send-source"],
         [function() { probe.closePopups(); view.item.lastSyncAt = Date.now() - 600000; view.item.info = Object.assign({}, view.item.info, { synced_block: 900 }) }, "wallet-behind"],
         [function() { view.item.openStatus() }, "wallet-status-popover"],
         [function() { probe.closePopups(); view.item.info = Object.assign({}, view.item.info, { synced_block: view.item.info.last_block }) }, "wallet-clean"],
         [function() { view.item.tab = 1 }, "markets"],
+        [function() { view.item.openPosition(Fake.MARKET, Fake.PRIV, ""); probe.find(view.item, "positionPage").close() }, "position-overview"],
+        [function() { probe.find(view.item, "positionMarket").clicked() }, "position-market-menu"],
         [function() { view.item.openPosition(Fake.MARKET, Fake.PRIV, "borrow") }, "position-private"],
         [function() { view.item.prefill = { amount: "2500" } }, "position-borrow-quote"],
         [function() { view.item.prefill = { amount: "90000" } }, "position-spill"],
+        [function() { view.item.prefill = {}; view.item.openPosition(Fake.MARKET, Fake.PRIV, "repay"); probe.find(view.item, "positionPage").useAll = true }, "position-repay-all"],
         [function() { view.item.openPosition(Fake.MARKET, Fake.PUB, "supply"); view.item.prefill = { amount: "1000" } }, "position-public-save"],
         [function() { view.item.openPosition(Fake.MARKET, Fake.PUB, "supply"); view.item.prefill = { amount: "999999" } }, "position-short"],
         [function() { probe.land("supply", Fake.PUB, false) }, "position-landed-in"],
@@ -121,7 +125,8 @@ Window {
         [function() { view.item.dive = { job: "1793023400000-0000", title: "Pay back 1,000 USDC on Private · Main", seen: "Some position paid back 1,000 USDC." } }, "dive"],
         [function() { view.item.dive = { title: "Moving 5 LEZ to Private · Main", started: Date.now() - 30000, seen: "5 LEZ left your Everyday account. Not where it went.",
                                          error: { code: "unconfirmed", message: "tx … went out, but the network has made almost no blocks since" } } }, "dive-transfer-unsure"],
-        [function() { view.item.dive = null; view.item.tab = 0 }, "wallet-after"]
+        [function() { view.item.dive = null; view.item.tab = 0 }, "wallet-after"],
+        [function() { var ms = view.item.markets.slice(); ms[1] = Object.assign({}, ms[1], { pool: "Public/HyWkqC3kJ4N6ewpYoHgvBmKpfp9oWRrZBj25dg4G6HCb" }); view.item.markets = ms; view.item.openMarket = ms[1].market; view.item.tab = 1 }, "markets-screened"]
     ]
     property int step: 0
     // "frames": the Welcome intro, a frame every 200 ms for 5 s (setup mode), then exit.
@@ -149,6 +154,7 @@ Window {
     function land(op, account, priv) {
         view.item.openPosition(Fake.MARKET, account, op)
         var p = find(view.item, "positionPage")
+        p.close()
         p.landed = { op: op, symbol: op === "supply_collateral" ? "WETH" : "USDC", loanSym: "USDC", loanDec: 6, collDec: 18, amountText: "1,000",
                      key: p.posKey, before: { saved: "0", coll: p.coll, debt: "0" }, account: account, to: "", isPrivate: priv, apr: "0.18" }
         p.play()

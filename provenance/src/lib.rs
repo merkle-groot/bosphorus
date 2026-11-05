@@ -21,6 +21,7 @@ pub enum Error {
     TooManyLabels,
     BadPath,
     NotApproved,
+    Overflow,
 }
 
 impl core::fmt::Display for Error {
@@ -36,6 +37,7 @@ impl core::fmt::Display for Error {
             Self::TooManyLabels => "approved set is full",
             Self::BadPath => "malformed Merkle path",
             Self::NotApproved => "label not under the claimed root",
+            Self::Overflow => "amount overflow",
         };
         f.write_str(s)
     }
@@ -90,6 +92,27 @@ impl Lots {
     pub fn credit(&mut self, lot: Lot) -> Result<()> {
         if lot.amount == 0 {
             return Err(Error::ZeroAmount);
+        }
+        if self.0.iter().any(|l| l.label == lot.label) {
+            return Err(Error::DuplicateLabel);
+        }
+        if self.0.len() >= MAX_LOTS {
+            return Err(Error::TooManyLots);
+        }
+        self.0.push(lot);
+        Ok(())
+    }
+
+    /// A payout from a market into the holder's one lot of `lot.label` (screened markets): merges
+    /// into it, or starts it.
+    pub fn merge(&mut self, lot: Lot) -> Result<()> {
+        if lot.amount == 0 {
+            return Err(Error::ZeroAmount);
+        }
+        if let Ok(i) = self.find(&lot.asset, &lot.label) {
+            let held = &mut self.0[i].amount;
+            *held = held.checked_add(lot.amount).ok_or(Error::Overflow)?;
+            return Ok(());
         }
         if self.0.iter().any(|l| l.label == lot.label) {
             return Err(Error::DuplicateLabel);

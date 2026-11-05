@@ -7,12 +7,13 @@ import "../kit" as Kit
 import "../kit/units.js" as Units
 import "../kit/tide.js" as Tide
 
-// TPosition: one position in one market, and one op on it. The water is the position's debt
-// against its borrowing capacity (debt ÷ (collateral × price × LLTV), the sell line at 80% or just below the op row), as
-// it stands; a dashed line previews where the op would take it. When a submitted op lands
-// (docs/design/wallet-v2/HANDOFF.md, "Position"): the water settles, coins fall in or rise out,
-// the figure that changed glows and a note drops in. Private accounts act below the surface:
-// their ops are dives.
+// TPosition: one position in one market, as two cards, Lending and Borrowing; each action opens
+// a panel with one amount and one button. The water is the loan only: the position's debt against
+// its borrowing capacity (debt ÷ (collateral × price × LLTV)), in the Borrowing card as it stands
+// and in the panel of an op that moves it, where a dashed line previews where the op takes it.
+// Lending has no water. When a submitted op lands (docs/design/wallet-v2/HANDOFF.md, "Position"):
+// the water settles, coins fall in or rise out, the figure that changed glows and a note drops
+// in. Every position is private: ops are dives.
 Item {
     id: page
     objectName: "positionPage"
@@ -48,23 +49,32 @@ Item {
     property string to: ""            // "" = the account itself
     property string payer: ""         // "" = the signer
     property bool more: false
+    property bool sheet: false        // an op's panel is open
 
     // The position: held, a private slot, or the public one.
     readonly property var positions: m ? app.accountPositions(marketId, account) : []
-    readonly property var pos: {
-        for (var i = 0; i < positions.length; i++) {
-            var p = positions[i]
-            if (useHeld ? p.held : (!p.held && (!isPrivate || p.index === app.slot))) return p
-        }
+    // Another slot holds something (or one is chosen): the slot switcher shows.
+    readonly property bool otherSlots: app.slot !== 0 || positions.some(function(p) { return !p.held && p.index !== 0 && app.hasAnything(p) })
+    // The slot (collateral, debt, maybe lending) and the lending held on the account itself (E9).
+    readonly property var slotPos: {
+        for (var i = 0; i < positions.length; i++) if (!positions[i].held && (!isPrivate || positions[i].index === app.slot)) return positions[i]
         return null
     }
+    readonly property var heldPos: {
+        for (var i = 0; i < positions.length; i++) if (positions[i].held) return positions[i]
+        return null
+    }
+    readonly property var pos: useHeld ? heldPos : slotPos
     readonly property string saved: pos && pos.supplied_assets ? pos.supplied_assets : "0"
-    readonly property string coll: pos ? pos.collateral : "0"
-    readonly property string debt: pos && pos.debt ? pos.debt : "0"
+    readonly property string coll: slotPos ? slotPos.collateral : "0"
+    readonly property string debt: slotPos && slotPos.debt ? slotPos.debt : "0"
+    readonly property string heldLent: heldPos && heldPos.supplied_assets ? heldPos.supplied_assets : "0"
+    readonly property string slotLent: slotPos && slotPos.supplied_assets ? slotPos.supplied_assets : "0"
+    readonly property string lent: Units.add(heldLent, slotLent)
     // Where an op's tokens come from, and what that account holds of them (null: unknown).
     readonly property string payFrom: from !== "" ? from : account
     readonly property string payToken: m ? (op.token === "loan" ? m.loan_asset : m.collateral_asset) : ""
-    readonly property var payBalance: app.tokenBalance(payFrom, payToken)
+    readonly property var payBalance: m ? app.payable(m.market, payFrom, payToken) : null
     readonly property bool pays: op.op === "supply" || op.op === "supply_collateral" || op.op === "repay"
 
     // How much (base units) and what the op leaves.
@@ -83,6 +93,10 @@ Item {
         return { saved: s, coll: c, debt: d }
     }
     function capacity(c) { return parseFloat(c) * px * lltv }
+    // What the market lets a private op borrow against: its health check prices the collateral
+    // 2% under the feed (client ClaimConfig::private, price_width), as the price may move while proving.
+    readonly property real claimPrice: 0.98
+    function borrowable(c) { return capacity(c) * claimPrice }
     function hfOf(c, d) { return parseFloat(d) > 0 ? (capacity(c) > 0 ? capacity(c) / parseFloat(d) : 0) : Infinity }
     readonly property real hfNow: hfOf(coll, debt)
     readonly property real hfAfter: quote && quote.health_factor_after !== null && quote.health_factor_after !== undefined ? parseFloat(quote.health_factor_after) : hfOf(after.coll, after.debt)
@@ -98,39 +112,107 @@ Item {
         if (op.op === "withdraw_collateral" && Units.cmp(amount, coll) > 0) return { title: qsTr("Not that much set aside"), body: qsTr("This slot has %1 %2 of collateral.").arg(Units.format(coll, collDec)).arg(collSym), fix: Units.isZero(coll) ? "" : "all" }
         if (op.op === "withdraw" && Units.cmp(amount, saved) > 0) return Tide.refusal({ code: "insufficient_shares" }, { symbol: loanSym, saved: Units.format(saved, loanDec) })
         if (pays && payBalance !== null && Units.cmp(amount, payBalance) > 0) return Tide.refusal({ code: "insufficient_balance" }, { symbol: symbol, has: Units.format(payBalance, decimals) })
-        if ((op.op === "borrow" || op.op === "withdraw_collateral") && px > 0 && hfOf(after.coll, after.debt) < 1)
+        if ((op.op === "borrow" || op.op === "withdraw_collateral") && px > 0 && parseFloat(after.debt) > borrowable(after.coll))
             return Tide.refusal({ code: "unhealthy" }, { symbol: loanSym, maxBorrow: op.op === "borrow" && safeMax() !== "0" ? Units.format(safeMax(), loanDec) : "" })
         return null
     }
     readonly property var problem: localProblem !== null ? localProblem : (quoteError ? Tide.refusal(quoteError, { symbol: symbol, saved: Units.format(saved, loanDec), has: payBalance !== null ? Units.format(payBalance, decimals) : "", maxBorrow: op.op === "borrow" && safeMax() !== "0" ? Units.format(safeMax(), loanDec) : "" }) : null)
-    readonly property bool spills: problem !== null && (localProblem !== null ? (op.op === "borrow" || op.op === "withdraw_collateral") && hfOf(after.coll, after.debt) < 1 : quoteError && quoteError.code === "unhealthy")
+    readonly property bool spills: problem !== null && (localProblem !== null ? (op.op === "borrow" || op.op === "withdraw_collateral") && parseFloat(after.debt) > borrowable(after.coll) : quoteError && quoteError.code === "unhealthy")
 
-    // 99% of what's left under the line, in loan base units ("0" if nothing).
+    // 99% of what the market would still lend, in loan base units ("0" if nothing).
     function safeMax() {
-        var room = capacity(coll) - parseFloat(debt)
+        var room = borrowable(coll) - parseFloat(debt)
         if (!(room > 0)) return "0"
         var v = Math.floor(room * 0.99)
-        return v > 0 ? String(v).replace(/e\+?\d+$/, "") : "0"
+        return v > 0 ? v.toFixed(0) : "0"
     }
 
-    // The water.
+    // The water: debt ÷ capacity now, and after the op.
+    readonly property real ratioNow: {
+        var cap = capacity(coll), d = parseFloat(debt)
+        return d > 0 ? (cap > 0 ? d / cap : 1.1) : 0
+    }
     readonly property real ratioShown: {
         var c = problem ? coll : after.coll, d = problem ? debt : after.debt
         var cap = capacity(c)
         return parseFloat(d) > 0 ? (cap > 0 ? parseFloat(d) / cap : 1.1) : 0
     }
-    // The sell line: at 80% of the window, or lower if that would crowd the op row.
-    readonly property real sellAt: height > 0 ? Math.min(0.8, 1 - (topInset + opRow.y + opRow.height + 48) / height) : 0.8
-    readonly property real level: spills ? sellAt + 0.03 : Tide.level(ratioShown, sellAt)
-    readonly property real hfShown: spills ? 0.5 : (problem ? hfNow : hfAfter)
+    // The sell line: 80% up the card; in the panel, under its title.
+    readonly property real cardAt: 0.78
+    readonly property real sheetAt: 0.7
+    readonly property real level: spills ? sheetAt + 0.03 : Tide.level(ratioShown, sheetAt)
+    readonly property real levelNow: Tide.level(ratioNow, sheetAt)
     // The tour shows it on an empty position too.
-    readonly property bool showLine: parseFloat(debt) > 0 || parseFloat(after.debt) > 0 || spills || !!app.showSellLine
-    // The water as the position stands, and whether to preview where the op takes it.
-    readonly property real levelNow: {
-        var cap = capacity(coll), d = parseFloat(debt)
-        return Tide.level(d > 0 ? (cap > 0 ? d / cap : 1.1) : 0, sellAt)
-    }
+    readonly property bool showLine: parseFloat(debt) > 0 || !!app.showSellLine
+    // The panel has water when its op moves the loan: borrowing, or anything once there's debt.
+    readonly property bool sheetWater: !lend && (op.op === "borrow" || parseFloat(debt) > 0 || spills)
     readonly property bool preview: !working && (spills || (request !== null && problem === null && Math.abs(level - levelNow) > 0.004))
+
+    // "Safe unless WBTC falls below 35,000 USDC": the collateral price at the sell line, for c and d.
+    function sellPrice(c, d) {
+        if (!(parseFloat(d) > 0 && parseFloat(c) > 0 && lltv > 0)) return ""
+        var liq = (parseFloat(d) / Math.pow(10, loanDec)) / ((parseFloat(c) / Math.pow(10, collDec)) * lltv)
+        return Number(liq.toPrecision(4)).toLocaleString(Qt.locale("en_US"), "f", liq >= 100 ? 0 : 2)
+    }
+    readonly property string priceNow: feed ? Units.price(feed.price, loanDec, collDec) : "–"
+    // What the collateral lets you borrow in all, in loan base units.
+    function limitOf(c) { var v = Math.floor(borrowable(c)); return v > 0 ? v.toFixed(0) : "0" }
+
+    // The market menu is open (the guide points into it).
+    readonly property bool marketMenuOpen: marketMenu.opened
+
+    // ---- the panel ----------------------------------------------------------------------
+
+    function open(i) {
+        var o = Tide.ops[i].op
+        // Lending goes on the account itself unless only the slot has some to take back.
+        if (o === "supply") held = true
+        if (o === "withdraw") held = !(Units.isZero(heldLent) && !Units.isZero(slotLent))
+        opIndex = i; useAll = false; amountInput.text = ""; more = false; from = ""; to = ""; payer = ""
+        marketMenu.close()
+        sheet = true
+    }
+    function openOp(o) { for (var i = 0; i < Tide.ops.length; i++) if (Tide.ops[i].op === o) open(i) }
+    function close() { sheet = false; useAll = false; amountInput.text = "" }
+
+    readonly property string opTitle: op.token === "collateral" ? qsTr("%1 %2").arg(op.short).arg(collSym) : qsTr("%1 %2").arg(op.label).arg(loanSym)
+    readonly property string opSub: {
+        if (!m) return ""
+        var has = payBalance !== null ? Units.format(payBalance, decimals, 2) + " " + symbol : ""
+        switch (op.op) {
+        case "supply": case "supply_collateral": return has !== "" ? qsTr("You have %1 in %2").arg(has).arg(app.accountName(payFrom)) : ""
+        case "repay": return qsTr("You owe %1 %2").arg(Units.format(debt, loanDec, 2)).arg(loanSym) + (has !== "" ? qsTr(" · you have %1").arg(has) : "")
+        case "withdraw": return qsTr("You've lent %1 %2").arg(Units.format(saved, loanDec, 2)).arg(loanSym)
+        case "withdraw_collateral": return qsTr("%1 %2 put up").arg(Units.format(coll, collDec, 2)).arg(collSym)
+        case "borrow": return Units.isZero(coll) ? qsTr("Add %1 first: a loan needs collateral").arg(collSym) : qsTr("Against your %1 %2").arg(Units.format(coll, collDec, 2)).arg(collSym)
+        }
+        return ""
+    }
+    // Half of a base-unit amount, rounded down.
+    function half(raw) {
+        var s = Units.stripZeros(String(raw)), out = "", r = 0
+        for (var i = 0; i < s.length; i++) { var n = r * 10 + (s.charCodeAt(i) - 48); out += String(Math.floor(n / 2)); r = n % 2 }
+        return Units.stripZeros(out) || "0"
+    }
+    // The quick amounts: half and the most it can be ("all" fills in the whole position).
+    readonly property var picks: {
+        if (!m) return []
+        var top = "0", all = false
+        switch (op.op) {
+        case "supply": case "supply_collateral": top = payBalance || "0"; break
+        case "withdraw": top = saved; all = true; break
+        case "borrow": top = safeMax(); break
+        case "repay": all = payBalance === null || Units.cmp(payBalance, debt) >= 0; top = all ? debt : payBalance; break
+        case "withdraw_collateral":
+            if (parseFloat(debt) > 0) { var keep = parseFloat(debt) / (px * lltv * claimPrice) * 1.01; top = px > 0 ? Math.max(0, Math.floor(parseFloat(coll) - keep)).toFixed(0) : "0" }
+            else { top = coll; all = true }
+            break
+        }
+        if (Units.isZero(top)) return []
+        var max = op.op === "borrow" || (op.op === "withdraw_collateral" && !all) ? qsTr("Max") : qsTr("All")
+        return [{ label: qsTr("Half · %1").arg(Units.format(half(top), decimals, 2)), raw: half(top), all: false },
+                { label: max + " · " + Units.format(top, decimals, 2), raw: top, all: all }]
+    }
 
     // ---- after an op lands --------------------------------------------------------------
 
@@ -148,7 +230,8 @@ Item {
         if (!tracking || !trackedJob || !app.isTerminal(trackedJob.state)) return
         var t = tracking
         tracking = null
-        if (trackedJob.state === "done") { landed = t; landedWait.restart() }
+        // Landed: the panel closes so the cards show it.
+        if (trackedJob.state === "done") { landed = t; sheet = false; landedWait.restart() }
         // A private op's failure is on the dive screen; a public one's, here.
         else if (!(app.dive && app.dive.job === t.id))
             app.report(trackedJob.error || { code: trackedJob.state, message: String(trackedJob.note || qsTr("It didn't go through. See Activity.")) })
@@ -168,7 +251,7 @@ Item {
         NumberAnimation { target: page; property: "glowLevel"; to: 0; duration: 980; easing.type: Easing.InOutQuad }
         ScriptAction { script: page.glow = "" }
     }
-    // While a tracked op runs: its progress, from the job's state (proving ~1 min on a GPU).
+    // While a tracked op runs: its progress, from the job's state (proving 1–2 min on a GPU).
     property real tick: Date.now()
     Timer { interval: 250; repeat: true; running: page.active && page.working; onTriggered: page.tick = Date.now() }
     readonly property real workPct: {
@@ -198,7 +281,7 @@ Item {
         var where = t.to !== "" ? page.app.accountName(t.to) : page.app.accountName(t.account)
         var title = "", sub = ""
         switch (t.op) {
-        case "supply": title = qsTr("Saved %1").arg(amt); sub = qsTr("Now earning %1% a year").arg(t.apr) + (t.isPrivate ? qsTr(" · below the surface") : ""); break
+        case "supply": title = qsTr("Lent %1").arg(amt); sub = qsTr("Now earning %1% a year").arg(t.apr) + (t.isPrivate ? qsTr(" · below the surface") : ""); break
         case "withdraw": title = qsTr("Took back %1").arg(amt); sub = qsTr("Back in %1").arg(where); break
         case "supply_collateral": title = qsTr("Added %1 as collateral").arg(amt); sub = qsTr("Safety: %1").arg(safety); break
         case "withdraw_collateral": title = qsTr("Removed %1").arg(amt); sub = qsTr("Back in %1 · %2").arg(where).arg(safety); break
@@ -209,7 +292,7 @@ Item {
             break
         }
         if (here) {
-            splash.run(out, t.symbol, (out ? "+" : "−") + amt)
+            if (key !== "saved") splash.run(out, t.symbol, (out ? "+" : "−") + amt)
             page.glow = key
             glowAnim.restart()
         }
@@ -292,7 +375,7 @@ Item {
     function seenFromAbove() {
         var a = Units.format(page.amount, page.decimals) + " " + page.symbol
         switch (page.op.op) {
-        case "supply": return page.useHeld ? qsTr("%1 came into the market. New market totals. No position.").arg(a) : qsTr("Some position saved %1. New market totals.").arg(a)
+        case "supply": return page.useHeld ? qsTr("%1 came into the market. New market totals. No position.").arg(a) : qsTr("Some position lent %1. New market totals.").arg(a)
         case "withdraw": return page.useHeld ? qsTr("%1 left the market. New market totals. No position.").arg(a) : qsTr("Some position took back %1.").arg(a)
         case "supply_collateral": return qsTr("Some position added %1 of collateral.").arg(a)
         case "withdraw_collateral": return qsTr("Some position removed %1 of collateral.").arg(a)
@@ -341,456 +424,470 @@ Item {
 
     Connections {
         target: page.app
+        // Markets' Lend / Borrow open the panel; a borrow with nothing put up starts with the collateral.
         function onPresetOpChanged() {
-            if (page.app.presetOp === "") return
-            for (var i = 0; i < Tide.ops.length; i++) if (Tide.ops[i].op === page.app.presetOp) page.opIndex = i
+            var o = page.app.presetOp
+            if (o === "") return
             page.app.presetOp = ""
+            page.openOp(o === "borrow" && Units.isZero(page.coll) ? "supply_collateral" : o)
         }
         function onPrefillChanged() { if (page.app.prefill.amount) amountInput.text = page.app.prefill.amount }
     }
     // The guide's "Use …" button: an amount in base units, typed in for the user.
     function fill(raw) { page.useAll = false; amountInput.text = Units.exact(raw, page.decimals) }
 
-    // ---- the strait -------------------------------------------------------------------
-
-    Kit.Water {
-        id: water
-        level: page.levelNow
-        color: Tide.water(page.hfNow, page.isPrivate)
-        settleMs: 1400
-        overshoot: 0.9
-    }
-    Kit.SellLine { objectName: "sellLine"; at: page.sellAt; visible: page.showLine; label: qsTr("If the water reaches here, some %1 is sold").arg(page.collSym) }
-
-    // The rise the op would add, shaded from the water up to the preview line: red when it
-    // crosses the sell line.
-    Rectangle {
-        anchors.left: parent.left
-        anchors.right: parent.right
-        y: previewLine.y + 2
-        height: Math.max(0, water.y - y)
-        color: page.spills ? Qt.rgba(1, 0.33, 0.33, 0.22) : Qt.rgba(1, 1, 1, 0.07)
-        opacity: previewLine.opacity
-    }
-
-    // Where the op would take the water.
-    Item {
-        id: previewLine
-        anchors.left: parent.left
-        anchors.right: parent.right
-        height: 2
-        // Spilling: just above the sell line, rather than up in the header.
-        y: page.spills ? page.height * (1 - page.sellAt) - 22 : page.height * (1 - page.level)
-        opacity: page.preview ? 1 : 0
-        Behavior on y { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
-        Behavior on opacity { NumberAnimation { duration: 220 } }
-        readonly property color ink: page.spills ? Tide.bad : "#FFFFFF"
-        Row {
-            spacing: 6
-            Repeater {
-                model: Math.ceil(previewLine.width / 14)
-                delegate: Rectangle { width: 8; height: 2; color: previewLine.ink; opacity: 0.85 }
-            }
-        }
-        LogosText {
-            x: 28
-            anchors.bottom: parent.top
-            anchors.bottomMargin: 6
-            text: page.spills ? qsTr("Too much: past the sell line, your %1 could be sold").arg(page.collSym) : qsTr("After: %1").arg(Tide.word(page.hfAfter))
-            font.pixelSize: 12; font.weight: Font.Bold
-            color: previewLine.ink
-        }
-    }
-
-    Kit.Splash { id: splash; surfaceY: water.y; ceiling: page.topInset + 10 }
+    // ---- the two cards ----------------------------------------------------------------
 
     ColumnLayout {
         anchors.fill: parent
         anchors.topMargin: page.topInset
-        spacing: 0
+        anchors.leftMargin: 28
+        anchors.rightMargin: 28
+        anchors.bottomMargin: 24
+        spacing: 16
 
-        // Who and which.
+        // Which market (and, when there's a choice, which account and slot).
         RowLayout {
             Layout.fillWidth: true
-            Layout.leftMargin: 28
-            Layout.rightMargin: 28
             spacing: 10
-            Flow {
-                objectName: "positionWho"
-                Layout.fillWidth: true
-                spacing: 6
-                Repeater {
-                    model: page.app.accounts
-                    delegate: Kit.Pill {
-                        objectName: Units.isPrivate(modelData.account) ? "who-private" : "who-public"
-                        text: page.app.accountName(modelData.account)
-                        on: page.account === modelData.account
-                        onClicked: { page.app.actAs = modelData.account; page.app.slot = 0; page.useAll = false; page.from = ""; page.to = ""; page.payer = "" }
-                    }
-                }
-                Rectangle {
-                    visible: page.isPrivate && !page.useHeld
-                    height: 36; width: slotRow.implicitWidth + 4; radius: 18
-                    color: Tide.glass
-                    Row {
-                        id: slotRow
-                        anchors.centerIn: parent
-                        Kit.RoundButton { size: 32; text: "‹"; border.width: 0; color: "transparent"; onClicked: page.app.slot = Math.max(0, page.app.slot - 1) }
-                        LogosText { width: 60; horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter; text: qsTr("Slot #%1").arg(page.app.slot); font.pixelSize: 13; font.weight: Font.Bold }
-                        Kit.RoundButton { size: 32; text: "›"; border.width: 0; color: "transparent"; onClicked: page.app.slot = page.app.slot + 1 }
-                    }
-                }
-                Kit.Pill {
-                    objectName: "positionMarket"
-                    visible: page.app.markets.length > 1
-                    text: page.loanSym + " · " + page.collSym + " ▾"
-                    onClicked: {
-                        var ms = page.app.markets, i = 0
-                        for (; i < ms.length; i++) if (ms[i].market === page.marketId) break
-                        page.app.openMarket = ms[(i + 1) % ms.length].market
-                    }
-                }
-            }
-            // Saved · Collateral · Owe; the one an op just changed glows.
-            Row {
-                spacing: 2
-                LogosText { visible: !page.m; text: qsTr("No market yet"); font.pixelSize: 14; color: "#E0FFFFFF" }
-                Repeater {
-                    model: page.m ? [["saved", qsTr("Saved %1 %2").arg(Units.format(page.saved, page.loanDec, 2)).arg(page.loanSym)],
-                                     ["coll", qsTr("Collateral %1 %2").arg(Units.format(page.coll, page.collDec, 2)).arg(page.collSym)],
-                                     ["debt", qsTr("Owe %1 %2").arg(Units.format(page.debt, page.loanDec, 2)).arg(page.loanSym)]] : []
-                    delegate: Row {
+            Kit.Pill {
+                objectName: "positionMarket"
+                visible: page.app.markets.length > 1
+                text: page.loanSym + " · " + page.collSym + (page.m && page.m.pool ? " · " + qsTr("Screened") : "") + (marketMenu.opened ? " ▴" : " ▾")
+                on: marketMenu.opened
+                onClicked: marketMenu.opened ? marketMenu.close() : marketMenu.open()
+                // Every market, the open one ticked.
+                Popup {
+                    id: marketMenu
+                    y: parent.height + 8
+                    width: 300
+                    padding: 6
+                    background: Rectangle { color: "#13233D"; border.color: "#24FFFFFF"; radius: 14 }
+                    contentItem: Column {
                         spacing: 2
-                        LogosText { visible: index > 0; text: "·"; font.pixelSize: 14; color: "#99FFFFFF"; anchors.verticalCenter: parent.verticalCenter }
-                        Rectangle {
-                            implicitWidth: figure.implicitWidth + 12
-                            implicitHeight: figure.implicitHeight + 6
-                            radius: 8
-                            color: Qt.rgba(1, 1, 1, page.glow === modelData[0] ? 0.18 * page.glowLevel : 0)
-                            LogosText { id: figure; anchors.centerIn: parent; text: modelData[1]; font.pixelSize: 14; color: "#E0FFFFFF" }
-                        }
-                    }
-                }
-            }
-        }
-
-        // The op: Tide.ops in pairs (in, out), one labelled capsule per pair.
-        Flow {
-            id: opRow
-            objectName: "positionOps"
-            Layout.alignment: Qt.AlignHCenter
-            Layout.topMargin: 16
-            spacing: 14
-            Repeater {
-                model: [qsTr("Savings"), qsTr("Collateral"), qsTr("Loan")]
-                delegate: Rectangle {
-                    id: group
-                    readonly property int first: index * 2
-                    color: Tide.panel
-                    radius: height / 2
-                    border.width: 1.5
-                    border.color: "#4DFFFFFF"
-                    implicitHeight: 44
-                    implicitWidth: groupRow.implicitWidth + 8
-                    Row {
-                        id: groupRow
-                        anchors.verticalCenter: parent.verticalCenter
-                        x: 4
-                        spacing: 2
-                        LogosText {
-                            anchors.verticalCenter: parent.verticalCenter
-                            leftPadding: 12; rightPadding: 8
-                            text: modelData
-                            font.pixelSize: 12; font.weight: Font.Bold
-                            color: "#99FFFFFF"
-                        }
                         Repeater {
-                            model: 2
-                            delegate: Kit.Pill {
-                                readonly property int op: group.first + index
-                                objectName: "op-" + Tide.ops[op].op
-                                pillHeight: 34
-                                text: Tide.ops[op].short || Tide.ops[op].label
-                                offColor: "transparent"
-                                border.width: on ? 1.5 : 0
-                                on: op === page.opIndex
-                                onClicked: { page.opIndex = op; page.useAll = false; amountInput.text = "" }
+                            model: page.app.markets
+                            delegate: Rectangle {
+                                readonly property string loan: page.app.tokenSymbol(modelData.loan_asset)
+                                readonly property string collateral: page.app.tokenSymbol(modelData.collateral_asset)
+                                readonly property bool here: modelData.market === page.marketId
+                                objectName: modelData.market === page.app.marketFor(collateral) ? "positionMarket-" + collateral : ""
+                                width: 288; height: 54; radius: 10
+                                color: hover.containsMouse ? "#1FFFFFFF" : here ? "#12FFFFFF" : "transparent"
+                                Column {
+                                    x: 12; anchors.verticalCenter: parent.verticalCenter; spacing: 2
+                                    LogosText { text: loan + " · " + collateral + (modelData.pool ? " · " + qsTr("Screened") : ""); font.pixelSize: 15; font.weight: Font.Bold }
+                                    LogosText { text: modelData.pool ? qsTr("Screened money only") : qsTr("Borrow %1 with %2").arg(loan).arg(collateral); font.pixelSize: 12; color: Tide.text3 }
+                                }
+                                LogosText { visible: here; anchors.right: parent.right; anchors.rightMargin: 14; anchors.verticalCenter: parent.verticalCenter; text: "✓"; font.pixelSize: 15; font.weight: Font.Bold }
+                                MouseArea {
+                                    id: hover
+                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onClicked: { marketMenu.close(); page.app.openMarket = modelData.market }
+                                }
                             }
                         }
                     }
                 }
             }
+            Flow {
+                objectName: "positionWho"
+                spacing: 6
+                // Private accounts only: lending and borrowing stay below the surface.
+                Repeater {
+                    model: {
+                        var r = page.app.accounts.filter(function(a) { return Units.isPrivate(a.account) })
+                        return r.length > 1 ? r : []
+                    }
+                    delegate: Kit.Pill {
+                        objectName: "who-private"
+                        text: page.app.accountName(modelData.account)
+                        on: page.account === modelData.account
+                        onClicked: { page.app.actAs = modelData.account; page.app.slot = 0 }
+                    }
+                }
+            }
+            SlotPicker { visible: page.otherSlots }
+            Item { Layout.fillWidth: true }
+            LogosText { visible: !page.m; text: qsTr("No market yet"); font.pixelSize: 14; color: "#E0FFFFFF" }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.minimumHeight: 300
+            Layout.maximumHeight: 470
+            spacing: 24
+
+            // Lending: no water. What's lent, what it earns.
+            Rectangle {
+                objectName: "positionLend"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                radius: 22
+                color: Tide.panel
+                border.color: Tide.glassBorder
+                ColumnLayout {
+                    anchors.fill: parent; anchors.margins: 32; anchors.topMargin: borrowCard.height * (1 - page.cardAt) + 22; spacing: 8
+                    LogosText { text: qsTr("Lending"); font.pixelSize: 15; font.weight: Font.Bold; color: Tide.text3 }
+                    Figure { key: "saved"; text: Units.format(page.lent, page.loanDec, 2) + " " + page.loanSym }
+                    LogosText {
+                        Layout.fillWidth: true; wrapMode: Text.Wrap
+                        text: Units.isZero(page.lent) ? qsTr("Lend %1 and earn %2% a year. Take it back whenever you like.").arg(page.loanSym).arg(page.apr)
+                                                      : qsTr("Earning %1% a year. Take it back whenever you like.").arg(page.apr)
+                        font.pixelSize: 16; color: Tide.text2
+                    }
+                    Item { Layout.fillHeight: true }
+                    RowLayout {
+                        spacing: 12
+                        Kit.BigButton { objectName: "op-supply"; enabled: !!page.m; text: qsTr("Lend %1").arg(page.loanSym); buttonHeight: 50; onClicked: page.openOp("supply") }
+                        Kit.BigButton { objectName: "op-withdraw"; visible: !Units.isZero(page.lent); text: qsTr("Take back"); buttonHeight: 50; outline: true; onClicked: page.openOp("withdraw") }
+                    }
+                }
+            }
+
+            // Borrowing: the water is the loan, as it stands.
+            Rectangle {
+                id: borrowCard
+                objectName: "positionBorrow"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                radius: 22
+                color: Tide.panel
+                border.color: Tide.glassBorder
+                clip: true
+                readonly property bool owes: parseFloat(page.debt) > 0
+                readonly property bool hasColl: !Units.isZero(page.coll)
+                Kit.Water {
+                    id: cardWater
+                    visible: borrowCard.owes || borrowCard.hasColl
+                    anchors.margins: 1
+                    bottomLeftRadius: 21; bottomRightRadius: 21
+                    level: Tide.level(page.ratioNow, page.cardAt)
+                    color: Tide.water(page.hfNow, true)
+                    settleMs: 1400
+                    overshoot: 0.9
+                }
+                Kit.SellLine { objectName: "sellLine"; at: page.cardAt; visible: page.showLine; label: qsTr("%1 is sold if the water gets here").arg(page.collSym) }
+                Kit.Splash { id: splash; surfaceY: cardWater.y; ceiling: 10 }
+                ColumnLayout {
+                    anchors.fill: parent; anchors.margins: 32; anchors.topMargin: borrowCard.height * (1 - page.cardAt) + 22; spacing: 8
+                    LogosText { text: qsTr("Borrowing"); font.pixelSize: 15; font.weight: Font.Bold; color: Tide.text3 }
+                    Figure { key: "debt"; text: Units.format(page.debt, page.loanDec, 2) + " " + page.loanSym }
+                    LogosText {
+                        Layout.fillWidth: true; wrapMode: Text.Wrap
+                        text: borrowCard.owes ? (page.hfNow >= 1.5 ? qsTr("Against %1 %2. Safe unless %2 falls below %3 (now %4).") : Tide.word(page.hfNow) + qsTr(": against %1 %2, sold if %2 falls below %3 (now %4)."))
+                                                    .arg(Units.format(page.coll, page.collDec, 2)).arg(page.collSym).arg(page.sellPrice(page.coll, page.debt)).arg(page.priceNow)
+                            : borrowCard.hasColl ? qsTr("%1 %2 put up. You can borrow up to %3 %4.").arg(Units.format(page.coll, page.collDec, 2)).arg(page.collSym)
+                                                       .arg(Units.format(page.limitOf(page.coll), page.loanDec, 0)).arg(page.loanSym)
+                            : qsTr("Put up %1 to borrow %2 against it. The %1 stays yours.").arg(page.collSym).arg(page.loanSym)
+                        font.pixelSize: 15; color: Tide.text2
+                    }
+                    Item { Layout.fillHeight: true }
+                    RowLayout {
+                        spacing: 12
+                        Kit.BigButton {
+                            objectName: borrowCard.hasColl || borrowCard.owes ? "op-borrow" : "op-supply_collateral"
+                            enabled: !!page.m
+                            text: borrowCard.owes ? qsTr("Borrow more") : borrowCard.hasColl ? qsTr("Borrow %1").arg(page.loanSym) : qsTr("Add %1").arg(page.collSym)
+                            buttonHeight: 50
+                            onClicked: page.openOp(borrowCard.hasColl || borrowCard.owes ? "borrow" : "supply_collateral")
+                        }
+                        Kit.BigButton { objectName: "op-repay"; visible: borrowCard.owes; text: qsTr("Pay back"); buttonHeight: 50; outline: true; onClicked: page.openOp("repay") }
+                        Item { Layout.fillWidth: true }
+                        Row {
+                            visible: borrowCard.hasColl
+                            spacing: 18
+                            CardLink { objectName: "op-supply_collateral-link"; text: qsTr("Add %1").arg(page.collSym); onClicked: page.openOp("supply_collateral") }
+                            CardLink { objectName: "op-withdraw_collateral"; text: qsTr("Remove %1").arg(page.collSym); onClicked: page.openOp("withdraw_collateral") }
+                        }
+                    }
+                }
+            }
+        }
+        LogosText { text: qsTr("Private: only you know these are yours."); font.pixelSize: 13; color: Tide.text3 }
+        Item { Layout.fillHeight: true; Layout.maximumHeight: Math.max(0, page.height - page.topInset - 560) }
+    }
+
+    readonly property string apr: m ? (parseFloat(m.supply_apr) * 100).toFixed(2) : "–"
+
+    // A card's big figure; it glows when an op just changed it.
+    component Figure: Rectangle {
+        property string key: ""
+        property alias text: figureText.text
+        implicitWidth: figureText.implicitWidth + 16
+        implicitHeight: figureText.implicitHeight + 4
+        Layout.leftMargin: -8
+        radius: 12
+        color: Qt.rgba(1, 1, 1, page.glow === key ? 0.18 * page.glowLevel : 0)
+        LogosText { id: figureText; x: 8; anchors.verticalCenter: parent.verticalCenter; font.pixelSize: 52; font.weight: Font.ExtraBold; font.letterSpacing: -1.5 }
+    }
+    component CardLink: LogosText {
+        signal clicked()
+        font.pixelSize: 14; font.underline: true; font.weight: Font.DemiBold; color: "#FFFFFF"
+        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: parent.clicked() }
+    }
+    component SlotPicker: Rectangle {
+        height: 36; width: slotRow.implicitWidth + 4; radius: 18
+        color: Tide.glass
+        Row {
+            id: slotRow
+            anchors.centerIn: parent
+            Kit.RoundButton { size: 32; text: "‹"; border.width: 0; color: "transparent"; onClicked: page.app.slot = Math.max(0, page.app.slot - 1) }
+            LogosText { width: 60; horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter; text: qsTr("Slot #%1").arg(page.app.slot); font.pixelSize: 13; font.weight: Font.Bold }
+            Kit.RoundButton { size: 32; text: "›"; border.width: 0; color: "transparent"; onClicked: page.app.slot = page.app.slot + 1 }
+        }
+    }
+
+    // ---- an op's panel ----------------------------------------------------------------
+
+
+    Rectangle {
+        anchors.fill: parent
+        visible: page.sheet
+        color: "#B3050A14"
+        MouseArea { anchors.fill: parent; onClicked: page.close() }
+    }
+    Rectangle {
+        id: frame
+        objectName: "positionSheet"
+        visible: page.sheet
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: page.topInset + 6
+        width: Math.max(0, Math.min(640, page.width - 56))
+        height: Math.max(0, Math.min(660, page.height - page.topInset - 20))
+        radius: 22
+        color: "#122440"
+        border.color: Tide.glassBorder
+        clip: true
+        MouseArea { anchors.fill: parent }   // clicks stay in the panel
+
+        // The water, when the op moves the loan.
+        Item {
+            anchors.fill: parent
+            visible: page.sheetWater
+            Kit.Water { id: water; anchors.margins: 1; bottomLeftRadius: 21; bottomRightRadius: 21; level: page.levelNow; color: Tide.water(page.hfNow, true); settleMs: 1400; overshoot: 0.9 }
+            Kit.SellLine { at: page.sheetAt; label: qsTr("%1 is sold if the water gets here").arg(page.collSym) }
+            // The rise (or fall) the op would make, shaded between the water and the preview line.
+            Rectangle {
+                anchors.left: parent.left; anchors.right: parent.right
+                y: Math.min(previewLine.y + 2, water.y)
+                height: Math.abs(water.y - previewLine.y - 2)
+                color: page.spills ? Qt.rgba(1, 0.33, 0.33, 0.22) : Qt.rgba(1, 1, 1, 0.07)
+                opacity: previewLine.opacity
+            }
+            Item {
+                id: previewLine
+                anchors.left: parent.left; anchors.right: parent.right
+                height: 2
+                // Kept above the quote and button (paying it all back would put it under them),
+                // but a falling preview never above the water it falls from.
+                readonly property real target: page.spills ? frame.height * (1 - page.sheetAt) - 32 : frame.height * (1 - page.level)
+                y: Math.min(target, Math.max(actions.y - 16, water.y + 12))
+                opacity: page.preview ? 1 : 0
+                Behavior on y { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
+                Behavior on opacity { NumberAnimation { duration: 220 } }
+                Row { spacing: 6; Repeater { model: Math.max(0, Math.ceil(previewLine.width / 14)); delegate: Rectangle { width: 8; height: 2; color: "#FFFFFF"; opacity: 0.85 } } }
+                LogosText {
+                    x: 24; anchors.bottom: parent.top; anchors.bottomMargin: 6
+                    text: page.spills ? qsTr("After: too much, your %1 could be sold").arg(page.collSym) : qsTr("After: %1").arg(Tide.word(page.hfAfter).toLowerCase())
+                    font.pixelSize: 12; font.weight: Font.Bold; color: page.spills ? Tide.badText : "#FFFFFF"
+                }
+            }
+        }
+
+        // Title.
+        LogosText { x: 36; y: 28; text: page.opTitle; font.pixelSize: 24; font.weight: Font.ExtraBold }
+        LogosText { x: 36; y: 64; width: frame.width - 72; elide: Text.ElideRight; text: page.opSub; font.pixelSize: 15; color: Tide.text3 }
+        Rectangle {
+            objectName: "positionClose"
+            anchors.right: parent.right; anchors.rightMargin: 22; y: 24
+            width: 36; height: 36; radius: 18; color: Tide.glass
+            LogosText { anchors.centerIn: parent; text: "✕"; font.pixelSize: 15; color: Tide.text2 }
+            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.close() }
         }
 
         // The amount.
-        Item {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
         ColumnLayout {
             objectName: "positionAmountBox"
-            anchors.centerIn: parent
-            spacing: 6
-            RowLayout {
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: frame.height * (1 - page.sheetAt) + 14
+            spacing: 4
+            Item {
                 Layout.alignment: Qt.AlignHCenter
-                spacing: 26
-                Kit.RoundButton { text: "−"; onClicked: page.nudge(false) }
-                Item {
-                    implicitWidth: Math.max(220, amountInput.contentWidth + 20)
-                    implicitHeight: 104
-                    TextInput {
-                        id: amountInput
-                        objectName: "positionAmount"
-                        visible: !page.useAll
-                        anchors.fill: parent
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                        font.family: Theme.typography.publicSans
-                        font.pixelSize: 100
-                        font.weight: Font.ExtraBold
-                        font.letterSpacing: -5
-                        color: "#FFFFFF"
-                        selectionColor: Tide.waterDeep
-                        onTextChanged: if (text !== "") page.useAll = false
-                    }
-                    LogosText {
-                        anchors.centerIn: parent
-                        visible: page.useAll || amountInput.text === ""
-                        text: page.useAll ? qsTr("All") : "0"
-                        font.pixelSize: 100; font.weight: Font.ExtraBold; font.letterSpacing: -5
-                        color: page.useAll ? "#FFFFFF" : "#4DFFFFFF"
-                    }
+                implicitWidth: Math.max(220, amountInput.contentWidth + 20)
+                implicitHeight: 84
+                TextInput {
+                    id: amountInput
+                    objectName: "positionAmount"
+                    visible: !page.useAll
+                    anchors.fill: parent
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    font.family: Theme.typography.publicSans
+                    font.pixelSize: 76
+                    font.weight: Font.ExtraBold
+                    font.letterSpacing: -4
+                    color: "#FFFFFF"
+                    selectionColor: Tide.waterDeep
+                    focus: page.sheet
+                    onTextChanged: if (text !== "") page.useAll = false
                 }
-                Kit.RoundButton { text: "+"; onClicked: page.nudge(true) }
-            }
-            RowLayout {
-                Layout.alignment: Qt.AlignHCenter
-                spacing: 10
                 LogosText {
-                    text: page.useAll ? Units.format(page.amount, page.decimals) + " " + page.symbol : page.symbol
-                    font.pixelSize: 17; font.weight: Font.DemiBold; opacity: 0.85
-                }
-                Kit.Pill {
-                    visible: page.op.all
-                    pillHeight: 30; fontSize: 13
-                    text: qsTr("All")
-                    on: page.useAll
-                    onClicked: { page.useAll = !page.useAll; if (page.useAll) amountInput.text = "" }
+                    anchors.centerIn: parent
+                    visible: page.useAll || amountInput.text === ""
+                    text: page.useAll ? qsTr("All") : "0"
+                    font.pixelSize: 76; font.weight: Font.ExtraBold; font.letterSpacing: -4
+                    color: page.useAll ? "#FFFFFF" : "#4DFFFFFF"
                 }
             }
             LogosText {
                 Layout.alignment: Qt.AlignHCenter
-                Layout.topMargin: 10
-                text: page.spills ? qsTr("Too much") : Tide.word(page.hfShown)
-                font.pixelSize: 40; font.weight: Font.ExtraBold; font.letterSpacing: -1.2
+                text: page.useAll ? Units.format(page.amount, page.decimals) + " " + page.symbol : page.symbol
+                font.pixelSize: 17; font.weight: Font.DemiBold; opacity: 0.85
             }
-        }
+            Row {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.topMargin: 4
+                spacing: 8
+                Repeater {
+                    model: page.picks
+                    delegate: Kit.Pill {
+                        pillHeight: 32; fontSize: 13; dark: true
+                        text: modelData.label
+                        on: modelData.all ? page.useAll : (!page.useAll && page.raw === modelData.raw)
+                        onClicked: {
+                            if (modelData.all) { page.useAll = true; amountInput.text = "" }
+                            else { page.useAll = false; amountInput.text = Units.exact(modelData.raw, page.decimals) }
+                        }
+                    }
+                }
+            }
         }
 
         // What happens, and go.
-        RowLayout {
-            Layout.fillWidth: true
-            Layout.leftMargin: 28
-            Layout.rightMargin: 28
-            Layout.bottomMargin: 28
-            Layout.topMargin: 20
-            spacing: 20
+        ColumnLayout {
+            id: actions
+            anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+            anchors.margins: 32; anchors.bottomMargin: 24
+            spacing: 10
+
+            // The quote, in a sentence or two.
             ColumnLayout {
+                visible: page.problem === null && page.request !== null && !page.working
+                spacing: 4
+                LogosText { visible: page.quoting && page.quote === null; text: qsTr("Asking the market…"); font.pixelSize: 15; font.weight: Font.DemiBold; opacity: 0.8 }
+                Repeater {
+                    model: {
+                        if (page.quote === null) return []
+                        var a = page.after, q = []
+                        var fmtL = function(v) { return Units.format(v, page.loanDec, 2) + " " + page.loanSym }
+                        switch (page.op.op) {
+                        case "supply":
+                            var yr = parseFloat(page.amount) / Math.pow(10, page.loanDec) * parseFloat(page.m.supply_apr)
+                            q.push(qsTr("Earns %1% a year: about %2 %3 a year.").arg(page.apr).arg(yr.toLocaleString(Qt.locale("en_US"), "f", 2)).arg(page.loanSym))
+                            q.push(qsTr("Take it back whenever you like, while the market has %1 free (%2 now).").arg(page.loanSym).arg(fmtL(Units.sub(page.m.supplied, page.m.borrowed))))
+                            break
+                        case "withdraw": q.push(qsTr("You'll have %1 lent.").arg(fmtL(a.saved))); break
+                        case "borrow": case "repay":
+                            q.push(Units.isZero(a.debt) ? qsTr("You'll owe nothing. All paid off.") : qsTr("You'll owe %1.").arg(fmtL(a.debt)))
+                            if (!Units.isZero(a.debt)) q.push(qsTr("Safe unless %1 falls below %2 %3 (now %4).").arg(page.collSym).arg(page.sellPrice(a.coll, a.debt)).arg(page.loanSym).arg(page.priceNow))
+                            break
+                        case "supply_collateral": case "withdraw_collateral":
+                            if (parseFloat(page.debt) > 0)
+                                q.push(qsTr("The water goes %1. Safe unless %2 falls below %3 %4 (was %5).").arg(page.op.op === "supply_collateral" ? qsTr("down") : qsTr("up"))
+                                       .arg(page.collSym).arg(page.sellPrice(a.coll, a.debt)).arg(page.loanSym).arg(page.sellPrice(page.coll, page.debt)))
+                            else q.push(qsTr("You'll be able to borrow up to %1.").arg(fmtL(page.limitOf(a.coll))))
+                            break
+                        }
+                        return q
+                    }
+                    delegate: LogosText { Layout.fillWidth: true; wrapMode: Text.Wrap; text: modelData; font.pixelSize: 15; font.weight: index === 0 ? Font.DemiBold : Font.Normal; color: index === 0 ? "#FFFFFF" : Tide.text2 }
+                }
+                LogosText {
+                    visible: page.quote !== null && !!page.quote.valid_until && page.quote.valid_until - page.now < 120000
+                    text: {
+                        if (!page.quote || !page.quote.valid_until) return ""
+                        var s = Math.max(0, Math.round((page.quote.valid_until - page.now) / 1000))
+                        return qsTr("Offer holds for %1 more seconds.").arg(s)
+                    }
+                    font.pixelSize: 13; color: Tide.text2
+                }
+            }
+
+            // A refusal, with its one-tap fix.
+            Rectangle {
+                visible: page.problem !== null && !page.working
                 Layout.fillWidth: true
-                Layout.maximumWidth: 620
-                Layout.alignment: Qt.AlignBottom
-                spacing: 10
-
-                // The quote.
+                implicitHeight: errCol.implicitHeight + 28
+                radius: 18
+                color: Tide.card
+                border.color: "#40FFFFFF"
                 ColumnLayout {
-                    visible: page.problem === null && page.request !== null
-                    spacing: 4
-                    LogosText { visible: page.quoting && page.quote === null; text: qsTr("Asking the market…"); font.pixelSize: 16; font.weight: Font.DemiBold; opacity: 0.8 }
-                    Repeater {
-                        model: {
-                            if (page.quote === null) return []
-                            var q = [], a = page.after
-                            if (a.saved !== page.saved) q.push(qsTr("Saved %1 → %2 %3").arg(Units.format(page.saved, page.loanDec, 2)).arg(Units.format(a.saved, page.loanDec, 2)).arg(page.loanSym))
-                            if (a.coll !== page.coll) q.push(qsTr("Collateral %1 → %2 %3").arg(Units.format(page.coll, page.collDec, 2)).arg(Units.format(a.coll, page.collDec, 2)).arg(page.collSym))
-                            if (a.debt !== page.debt) q.push(qsTr("You owe %1 → %2 %3").arg(Units.format(page.debt, page.loanDec, 2)).arg(Units.format(a.debt, page.loanDec, 2)).arg(page.loanSym))
-                            if (parseFloat(a.debt) > 0 && parseFloat(a.coll) > 0 && page.lltv > 0) {
-                                var liq = (parseFloat(a.debt) / Math.pow(10, page.loanDec)) / ((parseFloat(a.coll) / Math.pow(10, page.collDec)) * page.lltv)
-                                q.push(qsTr("The water only reaches the line if %1 falls below %2 %3 (now %4).").arg(page.collSym).arg(Number(liq.toPrecision(4)).toLocaleString(Qt.locale("en_US"), "f", liq >= 100 ? 0 : 2)).arg(page.loanSym).arg(page.feed ? Units.price(page.feed.price, page.loanDec, page.collDec) : "–"))
-                            }
-                            return q
+                    id: errCol
+                    anchors.fill: parent; anchors.margins: 14; anchors.leftMargin: 16
+                    spacing: 6
+                    LogosText { text: page.problem ? page.problem.title : ""; font.pixelSize: 16; font.weight: Font.ExtraBold }
+                    LogosText { Layout.fillWidth: true; wrapMode: Text.Wrap; text: page.problem ? page.problem.body : ""; textFormat: Text.PlainText; font.pixelSize: 14; color: "#E6FFFFFF" }
+                    RowLayout {
+                        spacing: 12
+                        Kit.BigButton {
+                            visible: page.problem !== null && page.problem.fix !== ""
+                            buttonHeight: 36; fontSize: 13.5
+                            text: !page.problem ? "" : page.problem.fix === "all" ? (page.op.op === "withdraw" ? qsTr("Take back all") : qsTr("Remove all"))
+                                : page.problem.fix === "maxBorrow" ? qsTr("Borrow %1 instead").arg(Units.format(page.safeMax(), page.loanDec, 2))
+                                : page.problem.fix === "max" ? qsTr("Use all of it")
+                                : qsTr("Pay the fee from another account")
+                            onClicked: page.applyFix(page.problem.fix)
                         }
-                        delegate: LogosText { text: modelData; font.pixelSize: 16; font.weight: Font.DemiBold; wrapMode: Text.Wrap; Layout.fillWidth: true }
-                    }
-                    LogosText {
-                        visible: page.quote !== null && !!page.quote.valid_until
-                        text: {
-                            if (!page.quote || !page.quote.valid_until) return ""
-                            var s = Math.max(0, Math.round((page.quote.valid_until - page.now) / 1000))
-                            return qsTr("Offer holds for about %1 (until %2).").arg(s >= 120 ? qsTr("%1 minutes").arg(Math.round(s / 60)) : qsTr("%1 seconds").arg(s)).arg(new Date(page.quote.valid_until).toLocaleTimeString(Qt.locale("en_GB"), "HH:mm"))
-                        }
-                        font.pixelSize: 13; color: Tide.text2
-                    }
-                }
-
-                // A refusal, with its one-tap fix.
-                Rectangle {
-                    visible: page.problem !== null
-                    Layout.fillWidth: true
-                    implicitHeight: errCol.implicitHeight + 28
-                    radius: 18
-                    color: Tide.card
-                    border.color: "#40FFFFFF"
-                    ColumnLayout {
-                        id: errCol
-                        anchors.fill: parent; anchors.margins: 14; anchors.leftMargin: 16
-                        spacing: 6
-                        LogosText { text: page.problem ? page.problem.title : ""; font.pixelSize: 16; font.weight: Font.ExtraBold }
-                        LogosText { Layout.fillWidth: true; wrapMode: Text.Wrap; text: page.problem ? page.problem.body : ""; textFormat: Text.PlainText; font.pixelSize: 14; color: "#E6FFFFFF" }
-                        RowLayout {
-                            spacing: 12
-                            Kit.BigButton {
-                                visible: page.problem !== null && page.problem.fix !== ""
-                                buttonHeight: 36; fontSize: 13.5
-                                text: !page.problem ? "" : page.problem.fix === "all" ? (page.op.op === "withdraw" ? qsTr("Take back all") : qsTr("Remove all"))
-                                    : page.problem.fix === "maxBorrow" ? qsTr("Borrow %1 instead").arg(Units.format(page.safeMax(), page.loanDec, 2))
-                                    : page.problem.fix === "max" ? qsTr("Use all of it")
-                                    : qsTr("Pay the fee from another account")
-                                onClicked: page.applyFix(page.problem.fix)
-                            }
-                            LogosText { visible: page.quoteError !== null && page.localProblem === null; text: page.quoteError ? String(page.quoteError.code) : ""; font.family: Theme.typography.mono; font.pixelSize: 11; opacity: 0.75 }
-                        }
-                    }
-                }
-
-                LogosText {
-                    visible: page.isPrivate
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    textFormat: Text.StyledText
-                    font.pixelSize: 13; color: "#E0FFFFFF"
-                    text: page.useHeld ? qsTr("<b>Below the surface:</b> that this is yours, the savings receipt, where it lands. <b>Seen from above:</b> the amount and the market totals.")
-                                       : qsTr("<b>Below the surface:</b> that this is yours, your secret code, where it lands. <b>Seen from above:</b> the position's numbers and the market totals.")
-                }
-                Rectangle {
-                    visible: page.isPrivate && page.lend
-                    implicitHeight: 36
-                    implicitWidth: heldRow.implicitWidth + 18
-                    radius: 18
-                    color: "#33000000"
-                    border.color: "#4DFFFFFF"
-                    Row {
-                        id: heldRow
-                        anchors.verticalCenter: parent.verticalCenter
-                        x: 4
-                        spacing: 10
-                        Rectangle { width: 28; height: 28; radius: 14; color: page.held ? Tide.good : "#4DFFFFFF" }
-                        LogosText {
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: page.op.op === "supply" ? qsTr("Keep the savings receipt below the surface") : qsTr("From the savings kept below the surface")
-                            font.pixelSize: 13; font.weight: Font.DemiBold
-                        }
-                    }
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.held = !page.held }
-                }
-                LogosText {
-                    text: page.more ? qsTr("Fewer options") : qsTr("More options")
-                    font.pixelSize: 13; font.underline: true; color: "#E6FFFFFF"
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.more = !page.more }
-                }
-                Flow {
-                    visible: page.more
-                    Layout.fillWidth: true
-                    spacing: 8
-                    Repeater {
-                        model: {
-                            var r = []
-                            if (["supply", "supply_collateral", "repay"].indexOf(page.op.op) >= 0) r.push(["from", qsTr("Pay from")])
-                            if (["withdraw", "withdraw_collateral", "borrow"].indexOf(page.op.op) >= 0) r.push(["to", qsTr("Send to")])
-                            if (!page.isPrivate) r.push(["payer", qsTr("Fee paid by")])
-                            return r
-                        }
-                        delegate: Rectangle {
-                            height: 34; radius: 17
-                            width: routeText.implicitWidth + 24
-                            color: "#33000000"
-                            border.color: "#4DFFFFFF"
-                            LogosText {
-                                id: routeText
-                                anchors.centerIn: parent
-                                textFormat: Text.StyledText
-                                text: "<span style='opacity:.8'>" + modelData[1] + "</span> <b>" + page.routeName(modelData[0]) + "</b> ▾"
-                                font.pixelSize: 12
-                            }
-                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.cycle(modelData[0]) }
-                        }
+                        LogosText { visible: page.quoteError !== null && page.localProblem === null; text: page.quoteError ? String(page.quoteError.code) : ""; font.family: Theme.typography.mono; font.pixelSize: 11; opacity: 0.75 }
                     }
                 }
             }
-            Item { Layout.fillWidth: true }
-            ColumnLayout {
-                Layout.alignment: Qt.AlignBottom | Qt.AlignRight
-                spacing: 6
-                // The op on its way, in place of the button.
-                Rectangle {
-                    visible: page.working
-                    Layout.alignment: Qt.AlignRight
-                    implicitWidth: 300
-                    implicitHeight: workCol.implicitHeight + 28
-                    radius: 18
-                    color: Tide.card
-                    border.color: "#40FFFFFF"
-                    ColumnLayout {
-                        id: workCol
-                        anchors.fill: parent; anchors.margins: 14; anchors.leftMargin: 16; anchors.rightMargin: 16
-                        spacing: 8
-                        LogosText {
-                            text: page.tracking && page.tracking.isPrivate ? qsTr("Diving below… %1%").arg(Math.round(page.workPct)) : qsTr("Sending…")
-                            font.pixelSize: 16; font.weight: Font.ExtraBold
-                        }
+
+            // The op on its way, in place of the button.
+            Rectangle {
+                visible: page.working
+                Layout.fillWidth: true
+                implicitHeight: workCol.implicitHeight + 28
+                radius: 18
+                color: Tide.card
+                border.color: "#40FFFFFF"
+                ColumnLayout {
+                    id: workCol
+                    anchors.fill: parent; anchors.margins: 14; anchors.leftMargin: 16; anchors.rightMargin: 16
+                    spacing: 8
+                    LogosText { text: qsTr("Diving below… %1%").arg(Math.round(page.workPct)); font.pixelSize: 16; font.weight: Font.ExtraBold }
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 6
+                        radius: 3
+                        color: "#26FFFFFF"
                         Rectangle {
-                            Layout.fillWidth: true
-                            implicitHeight: 6
-                            radius: 3
-                            color: "#26FFFFFF"
-                            clip: true
-                            Rectangle {
-                                id: workFill
-                                height: parent.height
-                                radius: 3
-                                color: "#FFFFFF"
-                                width: page.tracking && page.tracking.isPrivate ? parent.width * page.workPct / 100 : parent.width * 0.3
-                                Behavior on width { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
-                                // Public: a gliding segment while it lands.
-                                SequentialAnimation on x {
-                                    running: page.working && !(page.tracking && page.tracking.isPrivate)
-                                    loops: Animation.Infinite
-                                    NumberAnimation { from: -workFill.width; to: workFill.parent.width; duration: 1300; easing.type: Easing.InOutSine }
-                                }
-                            }
-                        }
-                        LogosText {
-                            text: page.tracking && page.tracking.isPrivate ? qsTr("About %1 on this computer").arg(page.app.diveTime) : qsTr("Usually a few seconds")
-                            font.pixelSize: 12; color: Tide.text2
+                            height: parent.height; radius: 3; color: "#FFFFFF"
+                            width: parent.width * page.workPct / 100
+                            Behavior on width { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
                         }
                     }
+                    LogosText { text: qsTr("About %1 on this computer").arg(page.app.diveTime); font.pixelSize: 12; color: Tide.text2 }
                 }
-                Kit.BigButton {
-                    visible: !page.working
-                    objectName: "positionGo"
-                    Layout.alignment: Qt.AlignRight
-                    buttonHeight: 58
-                    fontSize: 17
-                    enabled: page.problem === null && page.quote !== null && page.quotedKey === page.requestKey && !page.submitting
-                    text: page.problem !== null ? page.op.label
-                        : page.isPrivate ? qsTr("Dive & %1 ↓").arg(page.op.label.toLowerCase())
-                        : (page.sent ? qsTr("Sent ✓") : page.op.label)
-                    onClicked: page.submit()
-                }
-                LogosText {
-                    Layout.alignment: Qt.AlignRight
-                    visible: page.problem === null && !page.working
-                    text: page.isPrivate ? qsTr("Diving takes %1 on this computer").arg(page.app.diveTime) : qsTr("Above the surface · anyone can see this is you")
-                    font.pixelSize: 12; color: Tide.text2
-                }
+            }
+            Kit.BigButton {
+                visible: !page.working
+                objectName: "positionGo"
+                Layout.fillWidth: true
+                buttonHeight: 56
+                fontSize: 17
+                enabled: page.problem === null && page.quote !== null && page.quotedKey === page.requestKey && !page.submitting
+                text: page.request === null || page.problem !== null ? page.opTitle
+                    : Tide.opText(page.op.op, (page.useAll ? qsTr("all") : Units.format(page.amount, page.decimals)) + " " + page.symbol, false)
+                onClicked: page.submit()
+            }
+            LogosText {
+                Layout.alignment: Qt.AlignHCenter
+                visible: !page.working
+                text: qsTr("Private · takes %1").arg(page.app.diveTime)
+                font.pixelSize: 12; color: Tide.text2
             }
         }
     }

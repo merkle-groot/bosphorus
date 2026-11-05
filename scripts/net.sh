@@ -9,7 +9,7 @@
 NETWORK=${NETWORK:-localnet}
 case $NETWORK in
   localnet)
-    RPC=http://127.0.0.1:3040
+    RPC=${RPC:-http://127.0.0.1:3040}
     export RISC0_DEV_MODE=1
     ;;
   testnet)

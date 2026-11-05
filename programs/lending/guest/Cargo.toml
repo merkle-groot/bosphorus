@@ -14,3 +14,4 @@ lee_core.workspace = true
 bosphorus-core.workspace = true
 bosphorus-lending.workspace = true
 bosphorus-oracle.workspace = true
+bosphorus-pool.workspace = true

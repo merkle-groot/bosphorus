@@ -11,14 +11,21 @@
 //!
 //! **Held shares (E9):** an [`Owner::held`] position is the owner's own account, so a private
 //! lender's supply and withdraw publish no position at all; such a position can never borrow.
+//! An account holds one market's position, so held lending in a market sits on the owner's
+//! sub-account for it ([`Client::held_account`]): the owner's own keys with an identifier naming
+//! the market, created by the first supply and found again by the wallet's sync.
+//!
+//! **Screened markets** (`params.pool`, design/screened-markets.md): inflows are paid from the
+//! payer's lots in the pool ([`Funding`], chosen by [`crate::pool::select_spends`]), outflows land
+//! in the recipient's market lot there, and the pool's accounts go last.
 
 use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use bosphorus_core::{MarketOp, PositionOp, WAD, claims, irm, position};
 pub use bosphorus_lending::{
-    Claimed, Config as LendingConfig, HealthClaim, Instruction, Interval, IrmParams, Liquidation, LiquidationAmount,
-    Market, MarketAccounts, MarketId, MarketParams, Position, Salt, Shard, Window,
+    Claimed, Config as LendingConfig, Funding, HealthClaim, Instruction, Interval, IrmParams, Liquidation,
+    LiquidationAmount, Market, MarketAccounts, MarketId, MarketParams, Position, Salt, Shard, Window,
 };
 use bosphorus_lending::{config_id, position_id};
 pub use common::{HashType, transaction::LeeTransaction};
@@ -27,12 +34,12 @@ pub use lee_core::encryption::SharedSecretKey;
 use lee::{
     AccountId, ProgramShardSelector, privacy_preserving_transaction::circuit::ProgramWithDependencies, program::Program,
 };
-use lee_core::program::PROGRAM_LOADER_ACCOUNT_ID;
+use lee_core::{Identifier, PrivateAccountKind, program::PROGRAM_LOADER_ACCOUNT_ID};
 use sequencer_service_rpc::RpcClient as _;
 use wallet::{AccDecodeData, AccountIdentity, AccountMention};
 
 pub use crate::now_ms;
-use crate::{Client, Feed, Holder, LENDING_ELF, ORACLE_ELF, TOKEN_ELF, U256};
+use crate::{Client, Feed, Holder, LENDING_ELF, ORACLE_ELF, POOL_ELF, TOKEN_ELF, U256};
 
 pub const PUBLIC_SALT: Salt = [0; 32];
 
@@ -49,6 +56,9 @@ fn read(id: AccountId, program: AccountId) -> AccountMention {
 struct Accounts {
     mentions: Vec<AccountMention>,
     private: Vec<AccountId>,
+    /// Private accounts this tx creates (a held sub-account's first supply): the wallet must know
+    /// them, empty, before it builds the witnesses ([`Client::create_accounts`]).
+    creates: Vec<(AccountId, PrivateAccountKind)>,
 }
 
 impl Accounts {
@@ -77,6 +87,17 @@ impl Accounts {
     /// A position: `holder`'s own account if it holds the shares there (E9), otherwise read only.
     fn position(&mut self, position: AccountId, holder: Holder, program: AccountId) -> &mut Self {
         if position == holder.id() { self.signer(holder, program) } else { self.read(position, program) }
+    }
+
+    /// A screened market's pool accounts, last: the config, then the escrow of each asset moved.
+    fn pool(&mut self, params: &MarketParams, assets: &[AccountId]) -> &mut Self {
+        if let Some(pool) = params.pool {
+            self.read(bosphorus_pool::config_id(&pool), pool);
+            for asset in assets {
+                self.read(bosphorus_pool::escrow_id(&pool, asset), *asset);
+            }
+        }
+        self
     }
 
     /// A payout account other than `owner` (public, or one of this wallet's private accounts).
@@ -108,6 +129,21 @@ impl Owner {
     pub fn held(holder: Holder) -> Self {
         Self { holder, salt: PUBLIC_SALT, held: true }
     }
+}
+
+/// Marks a held sub-account's identifier, so the app can tell sub-accounts from the user's own.
+pub const HELD_TAG: [u8; 8] = *b"bos/held";
+
+/// The identifier of a private owner's held sub-account in `market`: `HELD_TAG ‖
+/// SHA-256("/bosphorus/v1/held/" ‖ market)[..24]`. With the owner's keys it derives the account,
+/// so the owner's seed recovers it.
+pub fn held_identifier(market: &MarketId) -> Identifier {
+    use sha2::Digest as _;
+    let hash = sha2::Sha256::new().chain_update(b"/bosphorus/v1/held/").chain_update(market).finalize();
+    let mut value = [0u8; 32];
+    value[..8].copy_from_slice(&HELD_TAG);
+    value[8..].copy_from_slice(&hash[..24]);
+    Identifier::new(value)
 }
 
 /// `HMAC-SHA256(secret, "/bosphorus/v1/position-salt/" ‖ market_id ‖ owner ‖ index)`: unlinkable
@@ -353,6 +389,9 @@ pub enum Refusal {
     PayerCannotFund { payer: AccountId, balance: u128, reserve: u128 },
     /// The faucet's cooldown for this claimer and asset runs until `next_ms`.
     FaucetCooldown { asset: AccountId, next_ms: u64 },
+    /// A screened market is paid from pool lots: `payer` holds `screened` (approved or market lots)
+    /// and `pending` (not approved yet) of `asset`, short of `need`.
+    Unscreened { payer: Holder, asset: AccountId, screened: u128, pending: u128, need: u128 },
 }
 
 impl std::fmt::Display for Refusal {
@@ -362,6 +401,10 @@ impl std::fmt::Display for Refusal {
                 write!(f, "payer {payer} holds {balance} native, below the sequencer's fee reserve {reserve}")
             }
             Self::FaucetCooldown { asset, next_ms } => write!(f, "already claimed {asset}: next claim at {next_ms} ms"),
+            Self::Unscreened { payer, asset, screened, pending, need } => write!(
+                f,
+                "a screened market is paid from pool lots: {payer} holds {screened} screened and {pending} pending of {asset}, this needs {need}"
+            ),
         }
     }
 }
@@ -391,6 +434,12 @@ fn check_feed(price: &Interval<U256>, feed: &Feed, params: &MarketParams, window
             end.saturating_sub(window.t) / 1000,
         )
     })
+}
+
+/// The shard an inflow is paid from, or an outflow paid into: the asset's, or the pool's (lots)
+/// in a screened market.
+fn money_shard(params: &MarketParams, asset: AccountId) -> AccountId {
+    params.pool.unwrap_or(asset)
 }
 
 /// A zero amount fails in `plan`, and a zero delta would pass the post-tx checks.
@@ -526,7 +575,8 @@ impl Client {
     /// moves tokens runs the asset programs with the signer's authority over all its balances
     /// (findings F1), and a private tx must be proven with exactly the deployed code.
     async fn market_programs(&self, lending: AccountId, params: &MarketParams) -> Result<ProgramWithDependencies> {
-        let deps: Vec<_> = params.checked_assets().into_iter().map(|asset| (asset, TOKEN_ELF)).collect();
+        let elf = |program| if Some(program) == params.pool { POOL_ELF } else { TOKEN_ELF };
+        let deps: Vec<_> = params.checked_assets().into_iter().map(|program| (program, elf(program))).collect();
         self.program_with(lending, LENDING_ELF, &deps).await
     }
 
@@ -615,11 +665,36 @@ impl Client {
 
     /// Sends, waits for inclusion and checks. Returns `expect.amount`.
     pub async fn execute(&mut self, p: Prepared) -> Result<u128> {
+        self.create_accounts(&p)?;
         let sent = self.send(&p).await?;
         let not_included = if p.expect.is_private() { "private tx not included (a claim failed at settlement?)" } else { "tx not included" };
         let (tx, block) = self.wallet.poll_transaction(sent.hash).await.context(not_included)?;
         self.finish(&p.expect, &sent, &tx, block).await?;
         Ok(p.expect.amount)
+    }
+
+    /// Registers the private accounts `p` creates, empty, so the wallet proves their creation.
+    pub fn create_accounts(&mut self, p: &Prepared) -> Result<()> {
+        for (id, kind) in &p.accounts.creates {
+            self.wallet.storage_mut().key_chain_mut().insert_private_account(*id, kind.clone(), lee::Account::default())?;
+        }
+        Ok(())
+    }
+
+    /// `owner`'s held sub-account in `market` and its kind (see [`held_identifier`]).
+    pub fn held_sub(&self, owner: AccountId, market: &MarketId) -> Result<(AccountId, PrivateAccountKind)> {
+        let found = self.wallet.storage().key_chain().private_account(owner).with_context(|| format!("{owner} isn't a private account of this wallet"))?;
+        let kind = PrivateAccountKind::Regular(held_identifier(market));
+        Ok((AccountId::for_private_account(&found.key_chain.nullifier_public_key, &found.key_chain.viewing_public_key, &kind), kind))
+    }
+
+    /// Where a private `owner` holds its lending in `market` (E9): the owner's own account if its
+    /// shard already names this market (held before sub-accounts), else its sub-account.
+    pub async fn held_account(&self, lending: AccountId, owner: AccountId, market: &MarketId) -> Result<AccountId> {
+        if self.position(lending, owner).await?.is_some_and(|p| p.market_id == *market) {
+            return Ok(owner);
+        }
+        Ok(self.held_sub(owner, market)?.0)
     }
 
     /// `holder`'s position number `index` in a market. Private owners get a derived salt; public
@@ -658,6 +733,23 @@ impl Client {
             }
         }
         Ok(found)
+    }
+
+    /// Lots of `payer`'s paying `amount` of `asset` into a screened market; `None` when unscreened.
+    async fn funding(&self, params: &MarketParams, payer: Holder, asset: AccountId, amount: u128) -> Result<Option<Funding>> {
+        let Some(pool) = params.pool else { return Ok(None) };
+        let set = self.pool_approved(pool).await?;
+        ensure!(self.pool_config(pool).await?.roots.contains(&set.root), "the approved list changed while it was read: try again");
+        let lots = self.lots_of(pool, payer).await?;
+        let market = bosphorus_pool::market_label(&asset);
+        let mine = lots.0.iter().filter(|l| l.asset == *asset.value());
+        let screened: u128 = mine.clone().filter(|l| l.label == market || set.contains(&l.label)).map(|l| l.amount).sum();
+        let pending = lots.total(asset.value()) - screened;
+        if screened < amount {
+            return Err(anyhow::Error::new(Refusal::Unscreened { payer, asset, screened, pending, need: amount }));
+        }
+        let spends = crate::pool::select_spends(&lots, &set, asset, amount)?;
+        Ok(Some(Funding { spends, root: set.root }))
     }
 
     // ---- admin ----------------------------------------------------------------------------
@@ -722,10 +814,25 @@ impl Client {
         let shares = claims::supply_shares(assets, &rs)?;
         let (m, loan) = (on.accounts(), market.params.loan_asset);
         let mut accounts = Accounts::default();
-        accounts.read(m.market, lending).position(position, from, lending).signer(from, loan).read(m.loan_vault, loan);
+        let paid_from = money_shard(&market.params, loan);
+        accounts.read(m.market, lending);
+        match from {
+            Holder::Private(owner) if position != owner && self.held_sub(owner, &on.market).is_ok_and(|(sub, _)| sub == position) => {
+                accounts.signer(Holder::Private(position), lending);
+                if self.wallet.storage().key_chain().private_account(position).is_none() {
+                    accounts.creates.push(self.held_sub(owner, &on.market)?);
+                }
+            }
+            _ => {
+                accounts.position(position, from, lending);
+            }
+        }
+        accounts.signer(from, paid_from).read(m.loan_vault, loan);
+        accounts.pool(&market.params, &[loan]);
         let before = self.position_or_default(lending, position).await?;
         simulate(&market, &before, Some((c.window.t, MarketOp::Supply { rs, assets, shares })), &PositionOp::Supply { shares })?;
-        let ix = Instruction::Supply { params: market.params.clone(), assets, rs, window: c.window };
+        let funding = self.funding(&market.params, from, loan, assets).await?;
+        let ix = Instruction::Supply { params: market.params.clone(), assets, rs, window: c.window, funding };
         let expect = Expect::new(&ix, on, position, (Field::SupplyShares, &before, before.supply_shares + shares), shares, Some(c.window), "supply didn't apply")?;
         Prepared::new(ix, market.params, accounts, on.payer, expect)
     }
@@ -744,7 +851,7 @@ impl Client {
         let (m, loan, position) = (on.accounts(), market.params.loan_asset, on.position(owner));
         let mut accounts = Accounts::default();
         accounts.signer(owner.holder, loan).read(m.market, lending).position(position, owner.holder, lending).read(m.loan_vault, loan);
-        accounts.payout(to, owner.holder, loan);
+        accounts.payout(to, owner.holder, money_shard(&market.params, loan)).pool(&market.params, &[loan]);
         let before = self.position_or_default(lending, position).await?;
         simulate(&market, &before, Some((c.window.t, MarketOp::Withdraw { rs, shares, assets })), &PositionOp::Withdraw { shares })?;
         let ix = Instruction::Withdraw { params: market.params.clone(), shares, salt: owner.salt, rs, window: c.window };
@@ -763,10 +870,12 @@ impl Client {
         let (lending, market) = (on.lending, self.market(on.lending, &on.market).await?);
         let (m, coll) = (on.accounts(), market.params.collateral_asset);
         let mut accounts = Accounts::default();
-        accounts.position(position, from, lending).signer(from, coll).read(m.collateral_vault, coll);
+        accounts.position(position, from, lending).signer(from, money_shard(&market.params, coll)).read(m.collateral_vault, coll);
+        accounts.pool(&market.params, &[coll]);
         let before = self.position_or_default(lending, position).await?;
         simulate(&market, &before, None, &PositionOp::SupplyCollateral { assets })?;
-        let ix = Instruction::SupplyCollateral { params: market.params.clone(), assets };
+        let funding = self.funding(&market.params, from, coll, assets).await?;
+        let ix = Instruction::SupplyCollateral { params: market.params.clone(), assets, funding };
         let expect = Expect::new(&ix, on, position, (Field::Collateral, &before, before.collateral + assets), assets, None, "supply_collateral didn't apply")?;
         Prepared::new(ix, market.params, accounts, on.payer, expect)
     }
@@ -798,7 +907,7 @@ impl Client {
             simulate(&market, &before, Some((c.window.t, MarketOp::Check { rb: claim.rb })), &PositionOp::WithdrawCollateral { assets, health })?;
             Some(claim)
         };
-        accounts.read(m.collateral_vault, coll).payout(to, owner.holder, coll);
+        accounts.read(m.collateral_vault, coll).payout(to, owner.holder, money_shard(&market.params, coll)).pool(&market.params, &[coll]);
         let window = health.map(|h| h.window);
         let ix = Instruction::WithdrawCollateral { params: market.params.clone(), assets, salt: owner.salt, health };
         let to = before.collateral - assets;
@@ -829,7 +938,8 @@ impl Client {
             .read(position, lending)
             .read(market.params.oracle_feed, market.params.oracle_program)
             .read(m.loan_vault, loan)
-            .payout(to, owner.holder, loan);
+            .payout(to, owner.holder, money_shard(&market.params, loan))
+            .pool(&market.params, &[loan]);
         let before = self.position_or_default(lending, position).await?;
         let health = claims::health(&claim.price, &claim.rb, market.params.lltv)?;
         simulate(&market, &before, Some((c.window.t, MarketOp::Borrow { rb: c.rb, assets, shares })), &PositionOp::Borrow { shares, health })?;
@@ -845,6 +955,13 @@ impl Client {
         self.execute(p).await
     }
 
+    /// What repaying `shares` would cost: at the top of the claimed interest window (`rb.hi`).
+    pub async fn repay_cost(&self, on: &On, shares: u128) -> Result<u128> {
+        let market = self.market(on.lending, &on.market).await?;
+        let c = on.claims.claims(&market, now_ms()?)?;
+        Ok(claims::repay_assets(shares, &Interval { lo: 0, hi: c.rb.hi })?)
+    }
+
     pub async fn prepare_repay(&self, on: &On, from: Holder, position: AccountId, shares: u128) -> Result<Prepared> {
         let (lending, market) = (on.lending, self.market(on.lending, &on.market).await?);
         let c = on.claims.claims(&market, now_ms()?)?;
@@ -852,10 +969,13 @@ impl Client {
         let assets = claims::repay_assets(shares, &rb)?;
         let (m, loan) = (on.accounts(), market.params.loan_asset);
         let mut accounts = Accounts::default();
-        accounts.read(m.market, lending).position(position, from, lending).signer(from, loan).read(m.loan_vault, loan);
+        let paid_from = money_shard(&market.params, loan);
+        accounts.read(m.market, lending).position(position, from, lending).signer(from, paid_from).read(m.loan_vault, loan);
+        accounts.pool(&market.params, &[loan]);
         let before = self.position_or_default(lending, position).await?;
         simulate(&market, &before, Some((c.window.t, MarketOp::Repay { rb, shares, assets })), &PositionOp::Repay { shares })?;
-        let ix = Instruction::Repay { params: market.params.clone(), shares, rb, window: c.window };
+        let funding = self.funding(&market.params, from, loan, assets).await?;
+        let ix = Instruction::Repay { params: market.params.clone(), shares, rb, window: c.window, funding };
         let to = before.borrow_shares - shares;
         let expect = Expect::new(&ix, on, position, (Field::BorrowShares, &before, to), assets, Some(c.window), "repay didn't apply")?;
         Prepared::new(ix, market.params, accounts, on.payer, expect)
@@ -870,17 +990,32 @@ impl Client {
         let Some(q) = quote_liquidation(&market, &before, &feed, &on.claims, now_ms()?)? else { return Ok(None) };
         let (m, params) = (on.accounts(), &market.params);
         self.market_programs(lending, params).await?;
-        let balance = self.token_balance(params.loan_asset, crate::Holder::Public(liquidator)).await?;
+        let who = crate::Holder::Public(liquidator);
+        // What the liquidator pays from: its balance, or in a screened market its lots there.
+        let held = async |c: &Self| -> Result<u128> {
+            match params.pool {
+                None => c.token_balance(params.loan_asset, who).await,
+                Some(pool) => Ok(c.lots_of(pool, who).await?.total(params.loan_asset.value())),
+            }
+        };
+        let balance = held(self).await?;
         ensure!(balance >= q.liquidation.repaid_assets, "liquidator holds {balance}, needs {}", q.liquidation.repaid_assets);
+        let (loan, coll) = (params.loan_asset, params.collateral_asset);
         let mut accounts = vec![
-            sign(liquidator, params.loan_asset),
+            sign(liquidator, money_shard(params, loan)),
             read(m.market, lending),
             read(position, lending),
             read(params.oracle_feed, params.oracle_program),
-            read(m.loan_vault, params.loan_asset),
-            read(m.collateral_vault, params.collateral_asset),
+            read(m.loan_vault, loan),
+            read(m.collateral_vault, coll),
         ];
-        accounts.extend(to.filter(|to| *to != liquidator).map(|to| read(to, params.collateral_asset)));
+        accounts.extend(to.filter(|to| *to != liquidator).map(|to| read(to, money_shard(params, coll))));
+        if let Some(pool) = params.pool {
+            accounts.push(read(bosphorus_pool::config_id(&pool), pool));
+            accounts.push(read(bosphorus_pool::escrow_id(&pool, &loan), loan));
+            accounts.push(read(bosphorus_pool::escrow_id(&pool, &coll), coll));
+        }
+        let funding = self.funding(params, who, loan, q.liquidation.repaid_assets).await?;
         let ix = Instruction::Liquidate {
             params: market.params.clone(),
             claimed: q.claimed,
@@ -888,11 +1023,12 @@ impl Client {
             price: q.price,
             rb: q.rb,
             window: q.window,
+            funding,
         };
         self.send_lending(lending, accounts, ix, on.payer).await?;
         // Not the position: its owner (or another liquidator) may have moved it since. Only the
-        // liquidator can debit its own balance, so an exact drop means our tx applied.
-        let after = self.token_balance(params.loan_asset, crate::Holder::Public(liquidator)).await?;
+        // liquidator can debit its own balance (or lots), so an exact drop means our tx applied.
+        let after = held(self).await?;
         let l = q.liquidation;
         ensure!(after + l.repaid_assets == balance, "liquidation didn't apply (price or position moved?)");
         Ok(Some(l))

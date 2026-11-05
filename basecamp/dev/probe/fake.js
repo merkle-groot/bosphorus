@@ -120,7 +120,7 @@ function answer(method, p, opts) {
             return p.account === PUB ? { account: PUB, loan_asset: USDC, loan: "180000000000", collateral_asset: WBTC, collateral: "190000000" }
                                      : { account: PRIV, loan_asset: USDC, loan: "0", collateral_asset: WBTC, collateral: "200000000" }
         return p.account === PUB ? { account: PUB, loan_asset: USDC, loan: "180000000000", collateral_asset: TKA, collateral: "3000000000000000000" }
-                                 : { account: PRIV, loan_asset: USDC, loan: "0", collateral_asset: TKA, collateral: "1500000000000000000" }
+                                 : { account: PRIV, loan_asset: USDC, loan: "3000000000", collateral_asset: TKA, collateral: "1500000000000000000" }
     case "quote": return { op: p.op, private: String(p.owner || p.from).indexOf("Private/") === 0, position: p.held ? p.owner : "Public/9BR8…", held: !!p.held,
                            field: "supply_shares", from: "0", to: "9999985226281826", amount: "9999985226281826", valid_until: now + 1200000, payer: null,
                            health_factor_after: p.op === "borrow" ? "1.310000000000000000" : null }

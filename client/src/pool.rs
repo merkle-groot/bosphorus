@@ -15,7 +15,9 @@ use wallet::{AccountIdentity, AccountMention};
 
 use crate::{Client, Holder, POOL_ELF, TOKEN_ELF, funds::TransferSent, no_sign, now_ms, send_error};
 
-pub use bosphorus_pool::{Admission, Approved, Config as PoolConfig, DepositRecord, Label, Lot, Lots, MAX_APPROVE, MAX_REMOVE, MAX_SPENDS};
+pub use bosphorus_pool::{
+    Admission, Approved, Config as PoolConfig, DepositRecord, Label, Lot, Lots, MAX_APPROVE, MAX_REMOVE, MAX_SPENDS, market_label,
+};
 
 /// Where a holder's lot stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +26,8 @@ pub enum LotState {
     Approved,
     /// Not approved (yet, or ever): only its depositor's ragequit takes it out.
     Pending,
+    /// The market lot: what screened markets paid out (borrows, withdrawals). Spendable, no ragequit.
+    Market,
 }
 
 impl LotState {
@@ -31,6 +35,7 @@ impl LotState {
         match self {
             Self::Approved => "approved",
             Self::Pending => "pending",
+            Self::Market => "market",
         }
     }
 }
@@ -48,6 +53,32 @@ pub fn parse_label(s: &str) -> Result<Label> {
         *byte = u8::from_str_radix(&s[2 * i..2 * i + 2], 16)?;
     }
     Ok(out)
+}
+
+/// Spends of `amount` of `asset` from `lots`: the market lot first (no path), then approved lots,
+/// largest first, each with its path in `set`. Pending lots are never spent.
+pub fn select_spends(lots: &Lots, set: &Approved, asset: AccountId, amount: u128) -> Result<Vec<Spend>> {
+    ensure!(amount > 0, "zero amount");
+    let market = market_label(&asset);
+    let mut usable: Vec<Lot> =
+        lots.0.iter().filter(|l| l.asset == *asset.value() && (l.label == market || set.contains(&l.label))).copied().collect();
+    usable.sort_by_key(|l| (l.label != market, std::cmp::Reverse(l.amount)));
+    let have: u128 = usable.iter().map(|l| l.amount).sum();
+    let pending = lots.total(asset.value()) - have;
+    ensure!(have >= amount, "{have} screened (and {pending} pending) of this asset, less than {amount}");
+    let mut spends = vec![];
+    let mut left = amount;
+    for lot in usable {
+        if left == 0 {
+            break;
+        }
+        let take = left.min(lot.amount);
+        let path = if lot.label == market { None } else { set.path(sha256, set.index_of(&lot.label).expect("approved")) };
+        spends.push(Spend { label: lot.label, amount: take, path });
+        left -= take;
+    }
+    ensure!(spends.len() <= MAX_SPENDS, "{amount} spans {} lots, more than {MAX_SPENDS} at once: do it in parts", spends.len());
+    Ok(spends)
 }
 
 /// The private accounts among `mentions`, once each, in order: one shared secret each.
@@ -109,6 +140,18 @@ impl Client {
         decode_lots(account.data.shard(pool)).map_err(|e| anyhow!(e))
     }
 
+    /// Any holder's lots: a private one's from the wallet's copy, a public one's from the chain.
+    pub async fn lots_of(&self, pool: AccountId, holder: Holder) -> Result<Lots> {
+        match holder {
+            Holder::Private(id) => self.pool_lots(pool, id),
+            Holder::Public(id) => match self.pool_shard(pool, id).await? {
+                None => Ok(Lots::default()),
+                Some(Shard::Lots(lots)) => Ok(lots),
+                Some(_) => bail!("{id} isn't a lot holder"),
+            },
+        }
+    }
+
     /// The holder's lots, each with whether it is approved now.
     pub async fn pool_lot_states(&self, pool: AccountId, holder: AccountId) -> Result<Vec<(Lot, LotState)>> {
         let lots = self.pool_lots(pool, holder)?;
@@ -116,7 +159,15 @@ impl Client {
             return Ok(vec![]);
         }
         let approved = self.pool_approved(pool).await?;
-        let state = |lot: &Lot| if approved.contains(&lot.label) { LotState::Approved } else { LotState::Pending };
+        let state = |lot: &Lot| {
+            if lot.label == market_label(&AccountId::new(lot.asset)) {
+                LotState::Market
+            } else if approved.contains(&lot.label) {
+                LotState::Approved
+            } else {
+                LotState::Pending
+            }
+        };
         Ok(lots.0.iter().map(|lot| (*lot, state(lot))).collect())
     }
 
@@ -155,6 +206,15 @@ impl Client {
             self.pool_set(pool, asp, bosphorus_pool::Instruction::Remove { removals, root: set.root }, payer).await?;
         }
         Ok(())
+    }
+
+    /// Lets a lending instance pay screened markets' outflows into market lots (or stops it).
+    pub async fn pool_set_market(&self, pool: AccountId, asp: AccountId, lending: AccountId, registered: bool, payer: Option<AccountId>) -> Result<HashType> {
+        let accounts = vec![Holder::Public(asp).signer(pool), no_sign(config_id(&pool), pool)];
+        let ix = bosphorus_pool::Instruction::SetMarket { lending, registered };
+        let hash = self.send_public("pool.set_market", pool, accounts, ix, payer).await?;
+        ensure!(self.pool_config(pool).await?.markets.contains(&lending) == registered, "set_market didn't apply");
+        Ok(hash)
     }
 
     async fn pool_set(&self, pool: AccountId, asp: AccountId, ix: bosphorus_pool::Instruction, payer: Option<AccountId>) -> Result<HashType> {
@@ -225,24 +285,7 @@ impl Client {
         let set = self.pool_approved(pool).await?;
         let current = set.root;
         ensure!(self.pool_config(pool).await?.roots.contains(&current), "the approved list changed while it was read: try again");
-        let mut lots: Vec<Lot> = self.pool_lots(pool, holder)?.0.into_iter().filter(|l| l.asset == *asset.value()).collect();
-        let pending: u128 = lots.iter().filter(|l| !set.contains(&l.label)).map(|l| l.amount).sum();
-        lots.retain(|l| set.contains(&l.label));
-        lots.sort_by_key(|l| std::cmp::Reverse(l.amount));
-        let approved: u128 = lots.iter().map(|l| l.amount).sum();
-        ensure!(approved >= amount, "Private/{holder} holds {approved} approved (and {pending} pending) of this asset, less than {amount}");
-        let mut spends = vec![];
-        let mut left = amount;
-        for lot in lots {
-            if left == 0 {
-                break;
-            }
-            let take = left.min(lot.amount);
-            let index = set.index_of(&lot.label).expect("approved");
-            spends.push(Spend { label: lot.label, amount: take, path: set.path(sha256, index).expect("in the set") });
-            left -= take;
-        }
-        ensure!(spends.len() <= MAX_SPENDS, "{amount} spans {} lots, more than {MAX_SPENDS} at once: withdraw it in parts", spends.len());
+        let spends = select_spends(&self.pool_lots(pool, holder)?, &set, asset, amount).with_context(|| format!("Private/{holder}"))?;
         let to_mention = match to {
             Holder::Public(t) => no_sign(t, asset),
             Holder::Private(_) => to.signer(asset),

@@ -77,6 +77,7 @@ pub fn setup() -> World {
         irm: irm(),
         lltv: 8 * WAD / 10,
         max_price_age: 3_600_000,
+        pool: None,
     };
     let admin = vec![(addr(&key(ADMIN)), lending), (config, lending)];
     chain.call(lending, admin.clone(), &[&key(ADMIN)], Instruction::EnableLltv { lltv: params.lltv }).unwrap();
@@ -165,14 +166,14 @@ impl World {
     pub fn supply(&mut self, payer: u8, position: AccountId, assets: u128) -> anyhow::Result<u64> {
         let (l, m) = (self.lending, self.accounts());
         let accounts = vec![(m.market, l), (position, l), (addr(&key(payer)), self.tkb), (m.loan_vault, self.tkb)];
-        let ix = Instruction::Supply { params: self.params.clone(), assets, rs: self.ratios().0, window: self.window() };
+        let ix = Instruction::Supply { params: self.params.clone(), assets, rs: self.ratios().0, window: self.window(), funding: None };
         self.lend(ix, accounts, &[&key(payer)])
     }
 
     pub fn supply_collateral(&mut self, payer: u8, position: AccountId, assets: u128) -> anyhow::Result<u64> {
         let (l, m) = (self.lending, self.accounts());
         let accounts = vec![(position, l), (addr(&key(payer)), self.tka), (m.collateral_vault, self.tka)];
-        self.lend(Instruction::SupplyCollateral { params: self.params.clone(), assets }, accounts, &[&key(payer)])
+        self.lend(Instruction::SupplyCollateral { params: self.params.clone(), assets, funding: None }, accounts, &[&key(payer)])
     }
 
     /// `owner` is who the tx names as owner, `signer` who actually signs (if anyone).
@@ -251,7 +252,7 @@ impl World {
             (m.loan_vault, self.tkb),
             (m.collateral_vault, self.tka),
         ];
-        let ix = Instruction::Liquidate { params: self.params.clone(), claimed, amount, price, rb, window: self.window() };
+        let ix = Instruction::Liquidate { params: self.params.clone(), claimed, amount, price, rb, window: self.window(), funding: None };
         self.lend(ix, accounts, &[&key(KEEPER)])
     }
 
@@ -273,7 +274,7 @@ impl World {
     pub fn repay(&mut self, payer: u8, position: AccountId, shares: u128) -> anyhow::Result<u64> {
         let (l, m) = (self.lending, self.accounts());
         let accounts = vec![(m.market, l), (position, l), (addr(&key(payer)), self.tkb), (m.loan_vault, self.tkb)];
-        let ix = Instruction::Repay { params: self.params.clone(), shares, rb: self.ratios().1, window: self.window() };
+        let ix = Instruction::Repay { params: self.params.clone(), shares, rb: self.ratios().1, window: self.window(), funding: None };
         self.lend(ix, accounts, &[&key(payer)])
     }
 }

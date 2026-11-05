@@ -66,7 +66,7 @@ function level(ratio, sellAt) {
 }
 
 var ops = [
-    { op: "supply", label: "Save", act: "Save %1", doing: "Saving %1", token: "loan", all: false },
+    { op: "supply", label: "Lend", act: "Lend %1", doing: "Lending %1", token: "loan", all: false },
     { op: "withdraw", label: "Take back", act: "Take back %1", doing: "Taking back %1", token: "loan", all: true },
     { op: "supply_collateral", label: "Add collateral", short: "Add", act: "Add %1 as collateral", doing: "Adding %1 as collateral", token: "collateral", all: false },
     { op: "withdraw_collateral", label: "Remove collateral", short: "Remove", act: "Remove %1 of collateral", doing: "Removing %1 of collateral", token: "collateral", all: true },
@@ -120,7 +120,7 @@ function refusal(e, ctx) {
     var c = e && e.code
     switch (c) {
     case "unhealthy": return { title: "This goes past the sell line", body: "Your debt would be more than your collateral covers, so some of it could be sold straight away." + (ctx.maxBorrow ? " You can borrow up to " + ctx.maxBorrow + " " + ctx.symbol + " more." : ""), fix: ctx.maxBorrow ? "maxBorrow" : "" }
-    case "insufficient_shares": return { title: "You don’t have that much saved", body: "This slot has " + (ctx.saved || "0") + " " + ctx.symbol + " saved.", fix: "all" }
+    case "insufficient_shares": return { title: "You don’t have that much lent", body: "This slot has " + (ctx.saved || "0") + " " + ctx.symbol + " lent.", fix: "all" }
     case "insufficient_collateral": return { title: "Not that much set aside", body: "This slot doesn’t hold that much collateral.", fix: "all" }
     case "insufficient_liquidity": return { title: "Not enough free in this market", body: "Try less, or wait for borrowers to pay back.", fix: "" }
     case "stale_price": return { title: "The price is out of date", body: "Prices must be fresh before anyone can borrow or take collateral out. The oracle has to publish a new one; then try again.", fix: "" }

@@ -47,8 +47,8 @@ Item {
         var r = j.request || {}
         var a = page.amountOf(j)
         switch (r.op) {
-        case "supply": return r.held ? qsTr("%1 came into the market. New market totals. No position.").arg(a) : qsTr("Some position saved %1. New market totals.").arg(a)
-        case "withdraw": return r.held ? qsTr("Savings left the market. New market totals. No position.") : qsTr("Some position took back savings.")
+        case "supply": return r.held ? qsTr("%1 came into the market. New market totals. No position.").arg(a) : qsTr("Some position lent %1. New market totals.").arg(a)
+        case "withdraw": return r.held ? qsTr("Lent money left the market. New market totals. No position.") : qsTr("Some position took back what it lent.")
         case "supply_collateral": return qsTr("Some position added %1 of collateral.").arg(a)
         case "withdraw_collateral": return qsTr("Some position removed collateral.")
         case "borrow": return qsTr("Some account now owes %1 more. %1 left the market.").arg(a)
@@ -66,7 +66,7 @@ Item {
         switch (j.state) {
         case "queued": return qsTr("Waiting for the one before it. Bosphorus does one thing at a time so nothing gets tangled.")
         case "preparing": return qsTr("Reading the market and checking this the way the program will.")
-        case "proving": return (page.gpu ? qsTr("Diving now, about a minute on the graphics card.") : qsTr("Diving on this computer’s processor. That takes about 10 minutes."))
+        case "proving": return (page.gpu ? qsTr("Diving now, a minute or two on the graphics card.") : qsTr("Diving on this computer’s processor. That takes about 10 minutes."))
                                + " " + qsTr("Keep Bosphorus open: if you close it, the dive stops before anything is sent, and you can start it again here.")
         case "sending": return qsTr("Signing and sending.")
         case "submitted": return page.app.sentText(j)
@@ -84,7 +84,7 @@ Item {
         if (app.weather === "offline") return [qsTr("No connection."), qsTr("Bosphorus can’t reach the network. Nothing is lost: what was sent lands or not on its own, and Bosphorus picks up when the connection is back."), Tide.badTint, "#FFE0DC"]
         if (!i) return null
         if (app.weather === "stalled") return [qsTr("The network is stalled."), qsTr("No new blocks for a few minutes. Anything sent waits until it moves again; don’t send it twice."), Tide.warnTint, "#FFEBC7"]
-        if (i.lending_problem) return [qsTr("Saving and borrowing are paused."), qsTr("The lending program isn’t the one Bosphorus expects. Your money is safe; new actions wait until it’s fixed."), Tide.badTint, "#FFE0DC"]
+        if (i.lending_problem) return [qsTr("Lending and borrowing are paused."), qsTr("The lending program isn’t the one Bosphorus expects. Your money is safe; new actions wait until it’s fixed."), Tide.badTint, "#FFE0DC"]
         if (i.privacy_circuit_problem) return [qsTr("Diving isn’t working right now."), qsTr("Something is wrong with the privacy system. Everyday accounts still work."), Tide.badTint, "#FFE0DC"]
         if (app.weather === "behind") return [qsTr("Catching up."), qsTr("Your private copy is %1 blocks behind. Private balances may be out of date until you Update.").arg(i.last_block - i.synced_block), Tide.infoTint, Tide.infoText]
         return null
@@ -311,7 +311,7 @@ Item {
                         return [
                             [qsTr("Network"), page.app.weather === "offline" ? qsTr("No connection") : !i ? "–" : page.app.stalled ? qsTr("Stalled at block %1").arg(fmt(i.last_block)) : qsTr("Block %1").arg(fmt(i.last_block))],
                             [qsTr("Your private copy"), !i ? "–" : (i.last_block - i.synced_block > 30 ? qsTr("Block %1").arg(fmt(i.synced_block)) : qsTr("Up to date"))],
-                            [qsTr("Diving on"), page.gpu ? qsTr("Graphics card · ~1 min") : qsTr("Processor · ~10 min")],
+                            [qsTr("Diving on"), page.gpu ? qsTr("Graphics card · 1–2 min") : qsTr("Processor · ~10 min")],
                             [qsTr("Lending program"), i && i.lending_problem ? qsTr("Problem") : qsTr("Working")],
                             [qsTr("Privacy system"), i && i.privacy_circuit_problem ? qsTr("Problem") : qsTr("Working")]
                         ]

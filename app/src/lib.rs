@@ -33,7 +33,7 @@ use bosphorus_client::{
     Client, Feed, Holder, LENDING_ELF, ORACLE_ELF, POOL_ELF, Rejected, TOKEN_ELF, hex_id, image_id,
     funds::TransferSent,
     lending::{
-        ClaimConfig, Expect, HashType, LeeTransaction, Market, MarketAccounts, MarketId, On, Owner, Position, Prepared, Refusal, Scanner, Sent,
+        ClaimConfig, Expect, HashType, LeeTransaction, Market, MarketAccounts, MarketId, MarketParams, On, Owner, Position, Prepared, Refusal, Scanner, Sent,
         SharedSecretKey, market_id_hex, market_status, now_ms, parse_market_id, position_status,
     },
     pool::{Label, LotState, hex32, parse_label},
@@ -170,6 +170,9 @@ impl ApiError {
                 cause.downcast_ref::<Refusal>().map(|r| match r {
                     Refusal::PayerCannotFund { .. } => "payer_cannot_fund".to_string(),
                     Refusal::FaucetCooldown { .. } => "faucet_cooldown".to_string(),
+                    Refusal::Unscreened { screened, pending, need, .. } => {
+                        if screened.saturating_add(*pending) >= *need { "not_approved" } else { "insufficient_balance" }.to_string()
+                    }
                 })
             }
         });
@@ -610,9 +613,15 @@ impl App {
     async fn accounts(&self) -> Result<Value> {
         let client = self.inner.client.read().await;
         let storage = client.wallet.storage();
+        // Held sub-accounts (one per market lent in) are part of their owner, not accounts of their own.
+        let sub = |id: &wallet::account::AccountIdWithPrivacy| match id {
+            wallet::account::AccountIdWithPrivacy::Private(a) => storage.key_chain().private_account(*a).is_some_and(|f| f.kind.identifier().as_ref().starts_with(&bosphorus_client::lending::HELD_TAG)),
+            wallet::account::AccountIdWithPrivacy::Public(_) => false,
+        };
         let ids: Vec<_> = storage
             .key_chain()
             .account_ids()
+            .filter(|(id, _)| !sub(id))
             .map(|(id, _)| (id, storage.labels_for_account(id).map(ToString::to_string).collect::<Vec<_>>()))
             .collect();
         let mut out = vec![];
@@ -631,13 +640,27 @@ impl App {
         let client = self.inner.client.read().await;
         let m = client.market(self.inner.config.lending, &market).await?;
         let (loan, coll) = (m.params.loan_asset, m.params.collateral_asset);
-        Ok(json!({
+        let (have_loan, have_coll) = (client.token_balance(loan, account).await?, client.token_balance(coll, account).await?);
+        let mut out = json!({
             "account": account.to_string(),
             "loan_asset": public(loan),
-            "loan": client.token_balance(loan, account).await?.to_string(),
+            "loan": have_loan.to_string(),
             "collateral_asset": public(coll),
-            "collateral": client.token_balance(coll, account).await?.to_string(),
-        }))
+            "collateral": have_coll.to_string(),
+            "screened": m.params.pool.is_some(),
+        });
+        // A screened market is paid from pool lots, so what can pay it is the screened lots
+        // (approved and market lots), next to the token balances (which the wallet shows).
+        if let Some(pool) = m.params.pool {
+            let (lots, set) = (client.lots_of(pool, account).await?, client.pool_approved(pool).await?);
+            let screened = |asset: AccountId| -> String {
+                let market = bosphorus_client::pool::market_label(&asset);
+                lots.0.iter().filter(|l| l.asset == *asset.value() && (l.label == market || set.contains(&l.label))).map(|l| l.amount).sum::<u128>().to_string()
+            };
+            out["loan_screened"] = json!(screened(loan));
+            out["collateral_screened"] = json!(screened(coll));
+        }
+        Ok(out)
     }
 
     /// Markets under the lending program: scans blocks since the last call (cached on disk). If the
@@ -727,11 +750,15 @@ impl App {
         for (index, id, p) in client.owned_positions(lending, &market, owner).await? {
             out.push(position_json(Some(index), id, &p, &m, feed.as_ref(), now)?);
         }
-        if let Holder::Private(id) = owner
-            && let Some(p) = client.position(lending, id).await?
-            && p.market_id == market
-        {
-            out.push(position_json(None, id, &p, &m, feed.as_ref(), now)?);
+        if let Holder::Private(id) = owner {
+            // Held on the account itself (before sub-accounts), or on its sub-account for the market.
+            for held in [Some(id), client.held_sub(id, &market).ok().map(|(sub, _)| sub)].into_iter().flatten() {
+                if let Some(p) = client.position(lending, held).await?
+                    && p.market_id == market
+                {
+                    out.push(position_json(None, id, &p, &m, feed.as_ref(), now)?);
+                }
+            }
         }
         Ok(Value::Array(out))
     }
@@ -998,7 +1025,7 @@ impl Move {
                         continue;
                     }
                     match state {
-                        LotState::Approved => approved = approved.saturating_add(lot.amount),
+                        LotState::Approved | LotState::Market => approved = approved.saturating_add(lot.amount),
                         LotState::Pending => pending = pending.saturating_add(lot.amount),
                     }
                 }
@@ -1049,6 +1076,7 @@ fn market_json(id: &MarketId, m: &Market, now: u64) -> Result<Value> {
         "oracle_feed": public(p.oracle_feed),
         "lltv": wad(p.lltv),
         "max_price_age_ms": p.max_price_age,
+        "pool": p.pool.map(public),
         "supplied": s.state.total_supply_assets.to_string(),
         "borrowed": s.state.total_borrow_assets.to_string(),
         "utilization": wad(s.utilization),
@@ -1107,13 +1135,17 @@ async fn prepare(client: &Client, lending: AccountId, r: &OpRequest) -> Result<P
         OpKind::Supply => {
             let from = need(from, "from")?;
             ensure!(!r.held || owner.is_none_or(|o| o == from), coded("bad_request", "a held supply goes into `from`'s own account"));
-            let owner = owner_of(owner.unwrap_or(from))?;
+            let owner = if r.held { held_owner(client, lending, &market, from).await? } else { owner_of(owner.unwrap_or(from))? };
             let assets = amount.exact("supply")?;
-            has_funds(client, from, client.market(lending, &market).await?.params.loan_asset, assets).await?;
+            let params = client.market(lending, &market).await?.params;
+            has_funds(client, from, &params, params.loan_asset, assets).await?;
             client.prepare_supply(&on, from, on.position(&owner), assets).await
         }
         OpKind::Withdraw => {
-            let owner = owner_of(need(owner, "owner")?)?;
+            let holder = need(owner, "owner")?;
+            let owner = if r.held { held_owner(client, lending, &market, holder).await? } else { owner_of(holder)? };
+            // A sub-account's withdrawal goes back to the account that lent it.
+            let to = to.or((owner.holder != holder).then_some(holder));
             let owned = client.position_shares(lending, on.position(&owner)).await?.supply_shares;
             let shares = match amount {
                 Amount::Exact(assets) if in_assets => {
@@ -1129,7 +1161,8 @@ async fn prepare(client: &Client, lending: AccountId, r: &OpRequest) -> Result<P
             let from = need(from, "from")?;
             let owner = owner_of(owner.unwrap_or(from))?;
             let assets = amount.exact("supply_collateral")?;
-            has_funds(client, from, client.market(lending, &market).await?.params.collateral_asset, assets).await?;
+            let params = client.market(lending, &market).await?.params;
+            has_funds(client, from, &params, params.collateral_asset, assets).await?;
             client.prepare_supply_collateral(&on, from, on.position(&owner), assets).await
         }
         OpKind::WithdrawCollateral => {
@@ -1149,7 +1182,8 @@ async fn prepare(client: &Client, lending: AccountId, r: &OpRequest) -> Result<P
             let owner = owner_of(owner.unwrap_or(from))?;
             let position = on.position(&owner);
             let owned = client.position_shares(lending, position).await?.borrow_shares;
-            let shares = match amount {
+            let cap = match amount { Amount::Exact(assets) if in_assets => Some(assets), _ => None };
+            let mut shares = match amount {
                 Amount::Exact(assets) if in_assets => {
                     let s = market_status(&client.market(lending, &market).await?, now_ms()?)?.state;
                     to_shares(assets, (s.total_borrow_assets, s.total_borrow_shares), owned)?
@@ -1157,16 +1191,42 @@ async fn prepare(client: &Client, lending: AccountId, r: &OpRequest) -> Result<P
                 Amount::Exact(shares) => shares,
                 Amount::All => owned,
             };
+            // A private repay pays at the top of its claimed interest window, a little over the
+            // projected ratio: fewer shares until the amount asked for is a ceiling (else "pay
+            // all I have" asks for more than that, and a screened market lot never fits).
+            if let Some(assets) = cap {
+                for _ in 0..4 {
+                    let cost = client.repay_cost(&on, shares).await?;
+                    if cost <= assets || shares == 0 {
+                        break;
+                    }
+                    let scaled = shares.checked_mul(assets).map_or(shares / cost * assets, |x| x / cost);
+                    shares = scaled.min(shares - 1);
+                }
+            }
             let p = client.prepare_repay(&on, from, position, shares).await?;
-            has_funds(client, from, p.params.loan_asset, p.expect.amount).await?;
+            has_funds(client, from, &p.params, p.params.loan_asset, p.expect.amount).await?;
             Ok(p)
         }
     }
 }
 
+/// A held position (E9): a private holder's lending in `market` sits on its own account or on its
+/// sub-account for the market ([`Client::held_account`]).
+async fn held_owner(client: &Client, lending: AccountId, market: &MarketId, holder: Holder) -> Result<Owner> {
+    match holder {
+        Holder::Private(id) => Ok(Owner::held(Holder::Private(client.held_account(lending, id, market).await?))),
+        Holder::Public(_) => Err(coded("bad_request", "only private accounts hold their lending")),
+    }
+}
+
 /// An op's tokens come from `from`: refused here, rather than sent and dropped by the network (a
-/// private tx) or landed as a failure that still pays its fee (a public one).
-async fn has_funds(client: &Client, from: Holder, token: AccountId, need: u128) -> Result<()> {
+/// private tx) or landed as a failure that still pays its fee (a public one). A screened market is
+/// paid from pool lots, which the client checks as it picks them (`Refusal::Unscreened`).
+async fn has_funds(client: &Client, from: Holder, params: &MarketParams, token: AccountId, need: u128) -> Result<()> {
+    if params.pool.is_some() {
+        return Ok(());
+    }
     let have = client.token_balance(token, from).await?;
     if have < need {
         let asof = if matches!(from, Holder::Private(_)) { " as of the last sync" } else { "" };
@@ -1264,8 +1324,10 @@ impl Inner {
     async fn start(self: &Arc<Self>, job: &Job) -> Result<()> {
         let heavy = self.heavy.lock().await;
         self.update(&job.id, |j| j.state = State::Preparing);
-        let client = self.client.read().await;
+        let mut client = self.client.write().await;
         let prepared = prepare(&client, self.config.lending, &job.request).await?;
+        client.create_accounts(&prepared)?;
+        let client = client.downgrade();
         let expect = prepared.expect.clone();
         let state = if expect.is_private() { State::Proving } else { State::Sending };
         self.update(&job.id, |j| {
