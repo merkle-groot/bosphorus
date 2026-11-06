@@ -15,7 +15,7 @@ they can use privacy: **screened deposits** (Privacy Pools) and **solvency proof
 ![Status](https://img.shields.io/badge/status-experimental-lightgrey?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue?style=flat-square)
 
-[Try it](#-try-it-in-basecamp) · [Compliance](#-private-and-compliant) · [TL;DR](#-tldr) · [App](#-the-app) · [Architecture](#-architecture) · [Claims](#-the-bounds-pattern) · [Privacy](#-privacy) · [Prover](#-the-gpu-prover) · [Privacy Pools](#-screened-pool-privacy-pools) · [Solvency proofs](#-solvency-proofs) · [Build](#-build) · [Limits](#-known-limits)
+[Website](https://bosphorus.primemodulus.com) · [Try it](#-try-it-in-basecamp) · [Compliance](#-private-and-compliant) · [TL;DR](#-tldr) · [App](#-the-app) · [Architecture](#-architecture) · [Claims](#-the-bounds-pattern) · [Privacy](#-privacy) · [Prover](#-the-gpu-prover) · [Privacy Pools](#-screened-pool-privacy-pools) · [Solvency proofs](#-solvency-proofs) · [Build](#-build) · [Limits](#-known-limits)
 
 </div>
 
@@ -24,7 +24,8 @@ they can use privacy: **screened deposits** (Privacy Pools) and **solvency proof
 ## 🚀 Try it in Basecamp
 
 Bosphorus installs into [Logos Basecamp](https://github.com/logos-co/logos-basecamp) from its own
-package repository, and runs against the LEZ testnet. You need a Mac with Apple Silicon.
+package repository, and runs against the LEZ testnet. You need a Mac with Apple Silicon. For an overview first, see
+[bosphorus.primemodulus.com](https://bosphorus.primemodulus.com).
 
 1. Install **Basecamp 0.3.2** from its
    [release page](https://github.com/logos-co/logos-basecamp/releases/tag/0.3.2) (the
