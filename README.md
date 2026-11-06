@@ -15,9 +15,37 @@ they can use privacy: **screened deposits** (Privacy Pools) and **solvency proof
 ![Status](https://img.shields.io/badge/status-experimental-lightgrey?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue?style=flat-square)
 
-[Compliance](#-private-and-compliant) · [TL;DR](#-tldr) · [App](#-the-app) · [Architecture](#-architecture) · [Claims](#-the-bounds-pattern) · [Privacy](#-privacy) · [Prover](#-the-gpu-prover) · [Privacy Pools](#-screened-pool-privacy-pools) · [Solvency proofs](#-solvency-proofs) · [Build](#-build) · [Limits](#-known-limits)
+[Try it](#-try-it-in-basecamp) · [Compliance](#-private-and-compliant) · [TL;DR](#-tldr) · [App](#-the-app) · [Architecture](#-architecture) · [Claims](#-the-bounds-pattern) · [Privacy](#-privacy) · [Prover](#-the-gpu-prover) · [Privacy Pools](#-screened-pool-privacy-pools) · [Solvency proofs](#-solvency-proofs) · [Build](#-build) · [Limits](#-known-limits)
 
 </div>
+
+---
+
+## 🚀 Try it in Basecamp
+
+Bosphorus installs into [Logos Basecamp](https://github.com/logos-co/logos-basecamp) from its own
+package repository, and runs against the LEZ testnet. You need a Mac with Apple Silicon.
+
+1. Install **Basecamp 0.3.2** from its
+   [release page](https://github.com/logos-co/logos-basecamp/releases/tag/0.3.2) (the
+   `aarch64.dmg`).
+2. In Basecamp, open **Settings** (the gear at the bottom of the sidebar), then **Package
+   Repositories**. Under **Add a repository**, paste this URL and click **Add**:
+
+   ```text
+   https://raw.githubusercontent.com/merkle-groot/bosphorus/main/basecamp/catalog/logos-repo.json
+   ```
+
+3. Open the app list, find **Bosphorus**, and click **Install**. Its core module comes with it.
+   The packages aren't signed yet, so Basecamp says it can't confirm who published them.
+4. Open Bosphorus and click **Create a wallet**. Write down the recovery words. While you do,
+   your computer proves a claim for some free test WBTC, which lands in your private account.
+5. Follow the guide: put the WBTC up as collateral, borrow USDC against it, and lend what you
+   don't need. Each private step is proved on your GPU, which takes about a minute.
+
+The testnet makes blocks unevenly. Most things land within a few minutes, but sometimes it pauses
+for 10 minutes or more, and the app tells you when it does. Everything is test money: the faucet
+gives each wallet USDC, WETH and WBTC once a day.
 
 ---
 

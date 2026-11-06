@@ -8,7 +8,8 @@ import "tide.js" as Tide
 // short label), and a card explains the step. Steps are data (tour.js); `stepShown` lets the view
 // switch tabs or set things up first. Items that aren't on screen are left out of the step.
 // `coach`: the guided first steps instead: one step at a time (show), clicks go through to the
-// lit items, and the card has the goal, an optional button (`action`, `act`) and Stop.
+// lit items, and the card has the goal, an optional button (`action`, `act`) and Stop (`stop`
+// renames it).
 Item {
     id: tour
     property Item scope                  // where to look for targets
@@ -205,7 +206,7 @@ Item {
                 LogosText { id: stepOf; text: tour.coach ? (tour.step ? tour.step.goal || "" : "") : qsTr("%1 of %2").arg(tour.index + 1).arg(tour.steps.length); font.pixelSize: 12; font.weight: Font.Bold; color: "#99FFFFFF" }
                 LogosText {
                     anchors.right: parent.right
-                    text: tour.coach ? qsTr("Stop guide") : qsTr("Skip tour"); font.pixelSize: 13; font.underline: true; color: "#CCFFFFFF"
+                    text: tour.coach ? (tour.step && tour.step.stop ? tour.step.stop : qsTr("Stop guide")) : qsTr("Skip tour"); font.pixelSize: 13; font.underline: true; color: "#CCFFFFFF"
                     MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: tour.skip() }
                 }
             }

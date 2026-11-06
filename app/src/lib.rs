@@ -289,6 +289,9 @@ struct Inner {
     first_events: Mutex<Option<broadcast::Receiver<Value>>>,
     /// `(synced, target)` while a sync runs.
     syncing: Mutex<Option<(u64, u64)>>,
+    /// A transfer or faucet claim that went out and is being waited for: its hash, and when it went
+    /// out (so a view can tell proving from waiting on the chain).
+    sent: Mutex<Option<(HashType, u64)>>,
     /// Set by [`App::stop`]: calls in flight answer `stopping`, no new job starts.
     stopping: tokio::sync::watch::Sender<bool>,
     config: Config,
@@ -346,6 +349,7 @@ impl App {
             heavy: tokio::sync::Mutex::new(()),
             first_events: Mutex::new(Some(first_events)),
             syncing: Mutex::new(None),
+            sent: Mutex::new(None),
             stopping: tokio::sync::watch::Sender::new(false),
             config,
             store,
@@ -592,6 +596,7 @@ impl App {
             "network_problem": network_problem,
             "synced_block": client.synced_block(),
             "syncing": self.inner.syncing.lock().expect("sync lock").map(|(synced, target)| json!({ "synced_block": synced, "target_block": target })),
+            "sent": self.inner.sent.lock().expect("sent lock").map(|(tx, at)| json!({ "tx": tx.to_string(), "sent_ms": at })),
             "privacy_circuit_problem": if reachable { problem(client.check_circuit().await) } else { None },
             "lending_problem": if reachable { problem(client.check_program(lending, LENDING_ELF).await) } else { None },
             "pool": self.inner.config.pool.map(public),
@@ -823,7 +828,10 @@ impl App {
             }
         };
         let since = self.inner.client.read().await.last_block().await.ok();
-        match self.inner.await_tx(hash, since).await? {
+        *self.inner.sent.lock().expect("sent lock") = Some((hash, now_ms()?));
+        let landing = self.inner.await_tx(hash, since).await;
+        *self.inner.sent.lock().expect("sent lock") = None;
+        match landing? {
             Landing::Landed(tx, block) => {
                 let synced = match &sent {
                     Some(sent) => {

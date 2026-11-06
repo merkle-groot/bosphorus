@@ -167,6 +167,19 @@ footer { max-width: 1120px; margin: 0 auto; padding: 30px 40px 50px; display: fl
 footer a { text-decoration: none; }
 footer a:hover { color: var(--teal); }
 
+
+/* app screenshots */
+.shots { margin-top: 56px; }
+.shot-tabs { display: inline-flex; gap: 4px; padding: 5px; border: 1px solid var(--line); border-radius: 999px; margin-bottom: 22px; }
+.shot-tabs button { font: inherit; font-size: 14px; color: var(--dim); background: none; border: 0; padding: 9px 18px; border-radius: 999px; cursor: pointer; transition: background .3s, color .3s; position: relative; overflow: hidden; }
+.shot-tabs button.on { background: var(--chalk); color: var(--sky); font-weight: 600; }
+.frame { position: relative; border-radius: 16px; overflow: hidden; border: 1px solid var(--line); box-shadow: 0 40px 100px rgba(0,0,0,.45); background: #0b1424; aspect-ratio: 1440 / 789; }
+.frame img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: top; opacity: 0; transform: scale(1.015); transition: opacity .7s ease, transform 1.2s ease; }
+.frame img.on { opacity: 1; transform: none; }
+.shot-cap { margin-top: 18px; color: var(--dim); font-size: 16px; min-height: 26px; }
+.shot-cap b { color: var(--chalk); font-weight: 600; }
+.shot-bar { height: 2px; background: var(--faint); margin-top: 14px; border-radius: 1px; overflow: hidden; }
+.shot-bar i { display: block; height: 100%; width: 0; background: var(--teal); }
 @media (max-width: 900px) {
   nav { padding: 14px 20px; } nav .links { display: none; } nav .gh { margin-left: auto; }
   section { padding: 90px 22px; }
@@ -200,6 +213,7 @@ footer a:hover { color: var(--teal); }
   <div class="links">
     <a href="#problem">Problem</a>
     <a href="#how">How it works</a>
+    <a href="#app">App</a>
     <a href="#features">Features</a>
     <a href="#prover">Prover</a>
     <a href="#limits">Limits</a>
@@ -274,9 +288,22 @@ footer a:hover { color: var(--teal); }
   </div>
 </section>
 
+<!-- the app -->
+<section id="app" data-depth="2">
+  <div class="kicker r"><b>03</b>The app</div>
+  <h2 class="r d1">A wallet with <em>a surface and a deep.</em></h2>
+  <p class="lead r d2">Bosphorus ships as a Basecamp module. Public balances sit above the surface, private ones below, and a position's health is a water level.</p>
+  <div class="shots r d2">
+    <div class="shot-tabs" id="shotTabs"></div>
+    <div class="frame" id="frame"></div>
+    <div class="shot-bar"><i id="shotBar"></i></div>
+    <p class="shot-cap" id="shotCap"></p>
+  </div>
+</section>
+
 <!-- features -->
 <section id="features" data-depth="3">
-  <div class="kicker r"><b>03</b>Features</div>
+  <div class="kicker r"><b>04</b>Features</div>
   <h2 class="r d1">A real money market, <em>with privacy built in.</em></h2>
   <div class="grid">
     <div class="feat r d1"><div class="ico">◐</div><h3>Private owners</h3><p>Positions are held by private accounts. Nothing published links one back to its owner, or two positions to each other.</p></div>
@@ -293,7 +320,7 @@ footer a:hover { color: var(--teal); }
 
 <!-- prover -->
 <section id="prover" data-depth="4">
-  <div class="kicker r"><b>04</b>The optimized prover</div>
+  <div class="kicker r"><b>05</b>The optimized prover</div>
   <h2 class="r d1">Ten minutes per click isn't a product. <em>So we fixed the prover.</em></h2>
   <p class="lead r d2">The proving library LEZ uses had no Apple GPU support. We wrote Metal kernels for it, bit-exact with the CPU code, and a schedule that executes everything first and then proves on two GPU lanes.</p>
   <div class="race r d2" id="race">
@@ -310,7 +337,7 @@ footer a:hover { color: var(--teal); }
 
 <!-- limits -->
 <section id="limits" data-depth="5">
-  <div class="kicker r"><b>05</b>Honest about it</div>
+  <div class="kicker r"><b>06</b>Honest about it</div>
   <h2 class="r d1">What the water <em>doesn't hide yet.</em></h2>
   <ul class="limits">
     <li class="r d1"><b>Position contents are public.</b> Collateral, debt and liquidation price stay visible so anyone can liquidate. Hiding them is the next design.</li>
@@ -404,6 +431,28 @@ footer a:hover { color: var(--teal); }
   mode(true);
   let auto = setInterval(() => mode(!card.classList.contains('private')), 3800);
   function stopAuto() { clearInterval(auto); }
+
+
+  // ---- app screenshots: tabs that rotate on their own until clicked ----
+  const SHOTS = [
+    ['Wallet', 'app-wallet.png', '<b>Wallet.</b> Dive moves tokens into your private account; Surface brings them back.'],
+    ['Markets', 'app-markets.png', '<b>Markets.</b> What lenders earn, what borrowers pay, the sell line and a fresh price.'],
+    ['Position', 'app-position.png', '<b>Position.</b> Health as a water level. This private position is close to its sell line.'],
+    ['Activity', 'app-activity.png', '<b>Activity.</b> Every op is a job that survives restarts, proved on the GPU in about a minute.'],
+  ];
+  const tabs = document.getElementById('shotTabs'), frame = document.getElementById('frame'), cap = document.getElementById('shotCap'), bar = document.getElementById('shotBar');
+  const imgs = SHOTS.map(([name, file]) => { const i = new Image(); i.src = 'img/' + file; i.alt = 'Bosphorus app: ' + name; i.loading = 'lazy'; frame.appendChild(i); return i; });
+  const btns = SHOTS.map(([name], k) => { const b = document.createElement('button'); b.textContent = name; b.onclick = () => { show(k); stopShots(); }; tabs.appendChild(b); return b; });
+  let cur = 0, shotTimer = null, shotT0 = 0, shotRaf = null; const SHOT_MS = 4500;
+  function show(k) {
+    cur = k; imgs.forEach((im, j) => im.classList.toggle('on', j === k)); btns.forEach((b, j) => b.classList.toggle('on', j === k));
+    cap.innerHTML = SHOTS[k][2]; shotT0 = performance.now();
+  }
+  function tick(now) { bar.style.width = Math.min(100, (now - shotT0) / SHOT_MS * 100) + '%'; shotRaf = requestAnimationFrame(tick); }
+  function startShots() { if (shotTimer || reduce) return; shotTimer = setInterval(() => show((cur + 1) % SHOTS.length), SHOT_MS); shotT0 = performance.now(); shotRaf = requestAnimationFrame(tick); }
+  function stopShots() { clearInterval(shotTimer); shotTimer = 'stopped'; cancelAnimationFrame(shotRaf); bar.style.width = '0'; }
+  show(0);
+  new IntersectionObserver(es => { if (es[0].isIntersecting && shotTimer === null) startShots(); }, { threshold: .4 }).observe(frame);
 
   // ---- prover race: 618 s vs 47 s, played back 20x ----
   const CPU = 618, GPU = 47, SPEED = 20;

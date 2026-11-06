@@ -211,6 +211,7 @@ Item {
         var what = page.amountText
         var proving = Units.isPrivate(page.fromId) || Units.isPrivate(page.toId)
         var record = { title: page.kind === "send" ? qsTr("Sending %1 to %2").arg(what).arg(Units.shortId(page.toId)) : qsTr("Moving %1 to %2").arg(what).arg(page.app.accountName(page.toId)),
+                       doneTitle: page.kind === "send" ? qsTr("Sent %1 to %2").arg(what).arg(Units.shortId(page.toId)) : qsTr("Moved %1 to %2").arg(what).arg(page.app.accountName(page.toId)),
                        started: Date.now(), done: false,
                        seen: Units.isPrivate(page.fromId) ? qsTr("%1 arrived somewhere. Not where it came from.").arg(what)
                                                           : qsTr("%1 left your Everyday account. Not where it went.").arg(what) }

@@ -1,7 +1,7 @@
 {
   "name": "bosphorus",
   "display_name": "Bosphorus",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Bosphorus lending on LEZ: isolated markets with private positions, proven on this machine's GPU. Keeps its own wallet.",
   "author": "Bosphorus",
   "type": "core",

@@ -357,10 +357,12 @@ Item {
         readonly property bool failed: !page.app.starterRunning && page.app.starterFailed
         readonly property bool landed: !page.app.starterRunning && !page.app.starterFailed
         readonly property int expectS: page.app.gpu ? 90 : 600
-        readonly property bool late: !landed && !failed && secs > expectS * 1.4
+        // The proof is done and the claim went out (the app's `info.sent`): waiting on a block.
+        readonly property bool waiting: !landed && !failed && !!(page.app.info && page.app.info.sent)
+        readonly property bool late: !landed && !failed && !waiting && secs > expectS * 1.4
         readonly property int secs: Math.max(0, Math.round((now - page.app.starterStarted) / 1000))
         // How far down the coin is: by time, never at the bottom before it lands.
-        readonly property real depth: landed ? 1 : failed ? 0 : Math.min(0.9, secs / expectS * 0.9)
+        readonly property real depth: landed ? 1 : failed ? 0 : waiting ? 0.9 : Math.min(0.9, secs / expectS * 0.9)
         readonly property string clock: Math.floor(secs / 60) + ":" + ("0" + secs % 60).slice(-2)
         readonly property string drop: {
             var id = page.app.tokenId("WBTC"), d = page.app.dropOf(id)
@@ -369,6 +371,8 @@ Item {
         readonly property real surface: water.y
         readonly property int margin: Math.max(32, Math.round(width * 0.06))
         Timer { interval: 1000; repeat: true; running: arriving.visible && !arriving.landed; onTriggered: arriving.now = Date.now() }
+        // Polls the app for the moment the claim goes out (and the block height, for a stall).
+        Timer { interval: 3000; repeat: true; running: arriving.visible && !arriving.landed && !arriving.failed; onTriggered: page.app.refreshInfo() }
 
         // Above the surface: what's happening, and what the network sees.
         Column {
@@ -377,7 +381,7 @@ Item {
             y: arriving.surface - height - 34
             spacing: 10
             LogosText {
-                text: arriving.landed ? qsTr("Your WBTC is here.") : arriving.failed ? qsTr("That didn't land.") : qsTr("Getting your WBTC")
+                text: arriving.landed ? qsTr("Your WBTC is here.") : arriving.failed ? qsTr("That didn't land.") : arriving.waiting ? qsTr("Your claim is sent") : qsTr("Getting your WBTC")
                 font.pixelSize: 44; font.weight: Font.ExtraBold; font.letterSpacing: -44 * 0.035
             }
             LogosText {
@@ -387,7 +391,8 @@ Item {
                 color: "#D1FFFFFF"
                 text: arriving.landed ? qsTr("%1test WBTC, out of sight in your Private account. Next: borrow some USDC against it.").arg(arriving.drop)
                     : arriving.failed ? qsTr("The network didn't take the claim, so nothing moved. Trying again starts a new one.")
-                    : qsTr("Your computer is proving the claim, so nobody learns it was you.")
+                    : arriving.waiting ? qsTr("Your computer has finished the proof and sent the claim. It will land when the test network makes its next block.")
+                    : qsTr("Your computer is proving the claim privately.")
             }
         }
         Column {
@@ -395,10 +400,11 @@ Item {
             y: arriving.surface - height - 38
             width: Math.min(300, arriving.width * 0.28)
             spacing: 4
-            LogosText { text: qsTr("Seen from above"); font.pixelSize: 13; font.weight: Font.Bold }
+            LogosText { text: qsTr("What everyone sees"); font.pixelSize: 13; font.weight: Font.Bold }
             LogosText {
                 width: parent.width; wrapMode: Text.Wrap; font.pixelSize: 13; color: Tide.text2
-                text: arriving.landed ? qsTr("Someone claimed %1test WBTC. Not who, and not where it went.").arg(arriving.drop)
+                text: arriving.landed ? qsTr("Someone claimed %1test WBTC. They can't see who it was or where it went.").arg(arriving.drop)
+                                      : arriving.waiting ? qsTr("Someone has sent a claim. They can't see who sent it or where the WBTC is going.")
                                       : qsTr("Nothing yet: the proof is made here, before anything is sent.")
             }
         }
@@ -454,12 +460,15 @@ Item {
             Row {
                 visible: !arriving.landed && !arriving.failed
                 spacing: 18
-                LogosText { text: arriving.clock; font.pixelSize: 40; font.weight: Font.ExtraBold; font.family: Theme.typography.mono; anchors.verticalCenter: parent.verticalCenter }
+                // A fixed slot as wide as the widest time, so the text beside it doesn't shift as the digits change.
+                TextMetrics { id: clockWidest; text: "88:88"; font: clockText.font }
+                LogosText { id: clockText; width: Math.ceil(clockWidest.advanceWidth); text: arriving.clock; font.pixelSize: 40; font.weight: Font.ExtraBold; font.family: Theme.typography.mono; anchors.verticalCenter: parent.verticalCenter }
                 LogosText {
                     anchors.verticalCenter: parent.verticalCenter
                     width: 300; wrapMode: Text.Wrap; font.pixelSize: 14; color: Tide.text2
-                    text: arriving.late ? qsTr("Taking longer than usual. It's still proving on this computer; nothing has gone out yet.")
-                                        : page.app.gpu ? qsTr("Usually a minute or two on the graphics card, then a few seconds to land.")
+                    text: arriving.waiting ? (page.app.stalled ? page.app.stalledText : page.app.pace)
+                        : arriving.late ? qsTr("Taking longer than usual. It's still proving on this computer; nothing has gone out yet.")
+                                        : page.app.gpu ? qsTr("This usually takes a minute or two on the graphics card. Then the claim is sent to the network.")
                                                        : qsTr("Usually about 10 minutes on this computer's processor.")
                 }
             }

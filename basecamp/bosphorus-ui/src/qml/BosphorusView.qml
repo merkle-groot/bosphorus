@@ -44,7 +44,7 @@ Item {
     // From the core's settings.json (status.settings); the defaults are the LEZ testnet and the
     // programs deployed there (DEPLOYMENTS.md).
     property string sequencerUrl: "https://testnet.lez.logos.co"
-    property string lendingId: "Public/8mnAx1h5Utbi1XCMUaHdACn6qM87Sek9NgKvdy2ewRKF"
+    property string lendingId: "Public/AcRkeyyREyeu2vrNxDXY5We6r4Hgt5vWZ6mX5syQFmyh"
     property string faucetId: ""
     property var scanFrom: null
     property var tokenNames: ({})
@@ -79,6 +79,10 @@ Item {
     property real now: Date.now()
     Timer { interval: 5000; repeat: true; running: true; onTriggered: root.now = Date.now() }
     readonly property bool stalled: root.online && root.info !== null && root.now - root.blockMovedAt > 120000
+    // Testnet's blocks come unevenly (a minute apart most of the time, gaps of 10–30 min some days):
+    // said wherever someone waits on one, so a pause doesn't read as a failure.
+    readonly property string pace: root.networkName === qsTr("Localnet") ? qsTr("Usually confirmed within a few seconds.") : qsTr("The test network makes blocks unevenly. Most things land within a few minutes, but sometimes it pauses for 10 minutes or more.")
+    readonly property string stalledText: qsTr("The test network hasn’t made a new block for %1. It pauses like this at times, sometimes for 10 minutes or more. Anything you’ve sent will land once it starts again, so don’t send it twice.").arg(Units.ago(root.now - root.blockMovedAt))
     readonly property bool gpu: !!(root.prover && root.prover.gpu)
     // How long a proof takes here, in words.
     readonly property string diveTime: root.gpu ? qsTr("a minute or two") : qsTr("about 10 minutes")
@@ -90,6 +94,7 @@ Item {
         if (root.screen === "main") reloadSettings()
         // A finished guide ends on the Wallet, where the bar takes over.
         if (root.tab === 0 && root.coachGoal !== "" && root.checklist[root.coachGoal === "borrow" ? 1 : 2].done) root.coachGoal = ""
+        if (root.tab === 2) Qt.callLater(root.maybePositionTour)
     }
     property string openMarket: ""     // the market Markets shows and Position acts in
     property string actAs: ""          // the account Position acts as: always a private one
@@ -146,7 +151,7 @@ Item {
         case "network": return qsTr("Can't reach the network. Check your connection; nothing was sent.")
         case "rejected": return qsTr("The network refused it, so nothing moved.") + (m ? " (" + m.replace(/^the network refused the transaction: /, "") + ")" : "")
         case "insufficient_balance": return qsTr("This account doesn't hold that much.") + (m.indexOf("last sync") >= 0 ? " " + qsTr("Private balances are as of your last Update.") : "")
-        case "unconfirmed": return qsTr("It was sent, but the network hasn't confirmed it yet; it may still arrive. Update your wallet in a few minutes and check before trying again.")
+        case "unconfirmed": return qsTr("It was sent, but the test network has paused and hasn't confirmed it yet. It usually lands once the network starts again, which can take 10 minutes or more. Update your wallet then, and check your balance before you try again.")
         case "not_included": return qsTr("The network didn't take it, so nothing moved. Update your wallet to be sure before trying again.")
         case "stopping": return qsTr("Bosphorus is closing.")
         case "not_open": return qsTr("The wallet isn't open yet.")
@@ -169,7 +174,7 @@ Item {
                          : qsTr("Not on the chain after several blocks, so the network most likely dropped it. Bosphorus keeps watching for a while; don’t do it again meanwhile.")
         if (note.indexOf("answer was lost") >= 0)
             return qsTr("Sent, but the network’s reply got lost. Bosphorus is looking for it on the chain; don’t do it again meanwhile.")
-        return qsTr("Sent to the network. Usually confirmed within a few seconds.")
+        return root.stalled ? root.stalledText : qsTr("Sent to the network.") + " " + root.pace
     }
 
     // Background refreshes fail quietly while the status pill already says the network is away.
@@ -650,16 +655,66 @@ Item {
 
     function startCoach(goal) { root.coachGoal = goal; showCoach() }
 
+    // Borrowed and lent in the guide: point at Position, then walk through it (Tour.position), once.
+    readonly property bool wantsPositionTour: root.faucet !== null && root.checklist[1].done && root.checklist[2].done
+                                              && !root.uiState.positionShown && !root.uiState.tourDone
+    property bool positionTour: false   // the tour on screen is Tour.position
+    function maybePositionTour() {
+        if (!root.wantsPositionTour || root.tab !== 2 || root.dive !== null || tour.visible || root.screen !== "main") return
+        root.coachGoal = ""
+        root.positionTour = true
+        tour.steps = Tour.position
+        tour.start()
+    }
+
     function amountOf(raw, symbol) { return Units.format(raw, tokenDecimals(tokenId(symbol)), symbol === "USDC" ? 0 : 4) + " " + symbol }
 
+    // Between guided steps, the Wallet dims and lights the next-step bar until "Show me" (or Later,
+    // which hides it until the next step).
+    property string nudgeLater: ""
+    readonly property string nudgeGoal: {
+        if (root.faucet === null || root.screen !== "main" || root.tab !== 0 || root.coachGoal !== "") return ""
+        var c = root.checklist
+        if (!c[0].done) return ""
+        if (!c[1].done) return "borrow"
+        if (!c[2].done && root.hasSaveUsdc) return "save"
+        return ""
+    }
     readonly property var coachStep: {
         var goal = root.coachGoal
+        // A guided op landed: light the dive screen's way back to Position.
+        if (root.dive !== null && root.dive.job && root.onboarding && diveOverlay.finished && !diveOverlay.failed) {
+            var c = root.checklist, g2 = goal === "save" || (c[1].done && !c[2].done && goal !== "borrow") ? qsTr("Lending privately") : qsTr("Borrowing privately")
+            var back = [{ name: "diveBack", label: root.wantsPositionTour ? qsTr("Click See your position") : qsTr("Click Back to position"), side: "above" }]
+            if (root.wantsPositionTour)
+                return { goal: g2, onDive: true, title: qsTr("Borrowed and lent"), body: qsTr("Nobody can see it was you. Your position shows both, and what you can do next."), targets: back }
+            if (c[0].done && !c[1].done)
+                return { goal: g2, onDive: true, title: qsTr("Your WBTC is in as collateral"), body: qsTr("Now borrow USDC against it. That's on Position too."), targets: back }
+            if (c[1].done && !c[2].done)
+                return { goal: g2, onDive: true, title: qsTr("Borrowed, out of sight"), body: qsTr("The USDC is in your Private account, and nobody can see who borrowed it. Lending comes next."), targets: back }
+            return null
+        }
+        if (goal === "" && root.nudgeGoal !== "" && root.nudgeLater !== root.nudgeGoal) {
+            var b = root.nudgeGoal === "borrow"
+            return { goal: b ? qsTr("Your WBTC is in") : qsTr("Your USDC is in"), nudge: root.nudgeGoal,
+                     title: b ? qsTr("Next: borrow against it") : qsTr("Next: lend it"),
+                     body: b ? qsTr("Borrow USDC against your WBTC without anyone seeing who borrowed. It takes a few clicks, and we'll show you each one.")
+                             : qsTr("Lend your USDC and earn what borrowers pay, without anyone seeing it's yours. We'll show you where to click."),
+                     targets: [{ name: "getStarted", label: qsTr("Your next step"), side: "below" }],
+                     action: qsTr("Show me"), act: function() { root.startCoach(root.nudgeGoal) }, stop: qsTr("Later") }
+        }
         if (goal === "" || root.screen !== "main") return null
         var borrow = goal === "borrow"
         var collSym = borrow ? "WBTC" : lendCollateral(), mk = marketFor(collSym), pair = "USDC · " + collSym
         var g = borrow ? qsTr("Borrowing privately") : qsTr("Lending privately")
         var step = function(title, body, targets, action, act) { return { goal: g, title: title, body: body, targets: targets, action: action || "", act: act || null } }
         if (root.checklist[borrow ? 1 : 2].done) {
+            // Both done: on to the position (on Position itself, its walkthrough takes over).
+            if (root.wantsPositionTour)
+                return root.tab === 2 ? null
+                     : step(borrow ? qsTr("Borrowed, out of sight") : qsTr("Lent, out of sight"),
+                            qsTr("You borrowed and lent, and nobody can see it was you. Your position shows both, and what you can do next."),
+                            [{ name: "navPosition", label: qsTr("Click Position"), side: "below" }])
             // Borrowed, with the USDC to save already in: on to saving, from here.
             if (borrow && root.hasSaveUsdc)
                 return step(qsTr("Borrowed, out of sight"), qsTr("The USDC is in your Private account, and nobody can see who borrowed it. Some more USDC came in to lend: that's next."),
@@ -721,15 +776,17 @@ Item {
     // On screen unless a dive or the tour is.
     function showCoach() {
         var s = root.coachStep
-        if (s && root.dive === null && !tour.visible) coach.show(s)
+        if (s && (root.dive === null || s.onDive) && !tour.visible) coach.show(s)
         else coach.visible = false
     }
     onCoachStepChanged: showCoach()
-    onDiveChanged: showCoach()
+    onDiveChanged: { showCoach(); if (root.dive === null) Qt.callLater(root.maybePositionTour) }
 
     function startTour() {
         root.coachGoal = ""
-        tour.steps = Tour.steps
+        root.positionTour = false
+        // A step's %1 is how long proving takes here (graphics card or processor).
+        tour.steps = Tour.steps.map(function(s) { return Object.assign({}, s, { body: s.body.replace("%1", root.diveTime) }) })
         tour.start()
     }
 
@@ -869,7 +926,7 @@ Item {
     }
     readonly property string weatherText: ({
         calm: qsTr("Up to date"), behind: qsTr("Catching up"), offline: qsTr("No connection"),
-        stalled: qsTr("Network stalled"), problem: qsTr("Rough water")
+        stalled: qsTr("Network paused"), problem: qsTr("Rough water")
     })[root.weather]
 
     readonly property var runningJobs: root.jobs.filter(function(j) { return !root.isTerminal(j.state) })
@@ -1040,7 +1097,7 @@ Item {
                                     behind: qsTr("The network has moved on since your private balances were last checked. Catch up to see them as they are now."),
                                     offline: root.lastOnlineAt > 0 ? qsTr("Bosphorus can't reach the network. You're seeing balances from %1 ago. Moving money is paused until you're back.").arg(Units.ago(root.now - root.lastOnlineAt))
                                                                    : qsTr("Bosphorus can't reach the network. Moving money is paused until you're back."),
-                                    stalled: qsTr("The network answers but hasn't made a block for a while. Anything you send waits until it starts again."),
+                                    stalled: root.stalledText,
                                     problem: qsTr("Something is wrong with this network: ") + String((root.info && (root.info.lending_problem || root.info.privacy_circuit_problem)) || "")
                                 })[root.weather]
                             }
@@ -1063,7 +1120,7 @@ Item {
             }
         }
 
-        Pages.DiveOverlay { anchors.fill: parent; app: root; visible: root.dive !== null; z: 5 }
+        Pages.DiveOverlay { id: diveOverlay; anchors.fill: parent; app: root; visible: root.dive !== null; z: 5 }
     }
 
     Kit.TourOverlay {
@@ -1079,7 +1136,12 @@ Item {
             root.showSellLine = step.setup === "position"
             root.tab = step.tab
         }
-        onFinished: function(skipped) { root.showSellLine = false; root.saveUi({ tourDone: true }); root.tab = 0 }
+        onFinished: function(skipped) {
+            root.showSellLine = false
+            // The position walkthrough ends where it is; the Wallet's bar still offers the full tour.
+            if (root.positionTour) { root.positionTour = false; root.saveUi({ positionShown: true }); return }
+            root.saveUi({ tourDone: true }); root.tab = 0
+        }
     }
 
     Kit.TourOverlay {
@@ -1091,7 +1153,7 @@ Item {
         coach: true
         scope: root
         bottomInset: toast.shown ? toast.height + 2 * Theme.spacing.xlarge : 0
-        onFinished: function(skipped) { root.coachGoal = "" }
+        onFinished: function(skipped) { if (coach.step && coach.step.nudge) root.nudgeLater = coach.step.nudge; root.coachGoal = "" }
     }
 
     LogosToast {

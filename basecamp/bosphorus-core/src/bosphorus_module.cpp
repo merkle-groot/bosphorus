@@ -82,16 +82,33 @@ std::string BosphorusModule::settingsPath()
     return (std::filesystem::path(instancePersistencePath()) / "settings.json").string();
 }
 
-// The string fields of settings.json the module knows; {} if there is no readable file.
+// The testnet deployment (.testnet/basecamp-settings.json, 2026-11-06), for an install with no
+// settings.json of its own (from a catalog): without it the view would point at no faucet and an
+// old lending program.
+static const char* const kTestnetSettings = R"json({
+  "sequencer": "https://testnet.lez.logos.co",
+  "lending": "Public/AcRkeyyREyeu2vrNxDXY5We6r4Hgt5vWZ6mX5syQFmyh",
+  "faucet": "Public/JDMRnJaptZBHsqnRvuGWPNUB46bQxEqMZZoAdF4Er7Vs",
+  "scan_from": 75708,
+  "tokens": {
+    "Public/26gcxP55vE4zQJCVcsTa5ffxFCTdZuywGo3bRUh1eLjD": "USDC",
+    "Public/6Hk7M2G7g8K7tEyouBMraaqpzFVPyo382Yu85HZfwjKX": "WETH",
+    "Public/5GPpsFWvNobCpsTxUfixpSUBnJVD7QJFNmKAp6wR6NJ9": "WBTC"
+  },
+  "markets": [
+    "cdc54d8b77d718dd392f4d477fbfe2b5090c5b7cf4eb58ce68e8e55387abeb2b",
+    "fbf5e259bbe4b8644f1dcf450cd5188273fa5006a955d922d2532f840d3007f4"
+  ]
+})json";
+
+// The string fields of settings.json the module knows; the testnet's if there is no file.
 static json readSettings(const std::string& path)
 {
     json out = json::object();
-    if (path.empty())
-        return out;
-    std::ifstream file(path);
-    if (!file)
-        return out;
-    json s = json::parse(file, nullptr, false);
+    std::ifstream file;
+    if (!path.empty())
+        file.open(path);
+    json s = file ? json::parse(file, nullptr, false) : json::parse(kTestnetSettings, nullptr, false);
     if (!s.is_object())
         return out;
     for (const char* key : {"sequencer", "lending", "pool", "faucet"}) {

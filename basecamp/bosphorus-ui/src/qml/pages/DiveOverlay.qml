@@ -88,13 +88,13 @@ Rectangle {
                     : dive.finished ? qsTr("Out of sight.") : qsTr("Diving…")
                 font.pixelSize: 52; font.weight: Font.ExtraBold; font.letterSpacing: -52 * 0.045
             }
-            LogosText { text: dive.d ? dive.d.title : ""; textFormat: Text.PlainText; font.pixelSize: 17; color: "#D9FFFFFF" }
+            LogosText { text: !dive.d ? "" : dive.finished && !dive.failed && dive.d.doneTitle ? dive.d.doneTitle : dive.d.title; textFormat: Text.PlainText; font.pixelSize: 17; color: "#D9FFFFFF" }
         }
         ColumnLayout {
             Layout.maximumWidth: 330
             Layout.alignment: Qt.AlignBottom
             spacing: 2
-            LogosText { text: qsTr("Seen from above"); font.pixelSize: 14; font.weight: Font.Bold }
+            LogosText { text: qsTr("What everyone sees"); font.pixelSize: 14; font.weight: Font.Bold }
             LogosText { Layout.fillWidth: true; wrapMode: Text.Wrap; text: dive.d ? dive.d.seen : ""; textFormat: Text.PlainText; font.pixelSize: 14; color: "#D9FFFFFF" }
         }
     }
@@ -190,27 +190,10 @@ Rectangle {
             font.pixelSize: 28; font.weight: Font.ExtraBold
         }
 
-        // The depth ruler: what has gone under.
-        Item {
-            anchors.right: parent.right; anchors.rightMargin: 28
-            anchors.top: parent.top; anchors.topMargin: 10
-            anchors.bottom: parent.bottom; anchors.bottomMargin: 24
-            width: 120
-            Rectangle { anchors.right: parent.right; width: 2; height: parent.height; color: "#59FFFFFF" }
-            Repeater {
-                model: [qsTr("Surface"), qsTr("Who you are"), qsTr("Your code"), qsTr("Where it lands"), qsTr("Out of sight")]
-                delegate: LogosText {
-                    anchors.right: parent.right; anchors.rightMargin: 12
-                    y: (parent.height - height) * index / 4
-                    text: modelData; font.pixelSize: 12; font.weight: Font.Bold; color: "#D9FFFFFF"
-                }
-            }
-        }
-
         // Footer.
         ColumnLayout {
             anchors.left: parent.left; anchors.leftMargin: 28
-            anchors.right: parent.right; anchors.rightMargin: 180
+            anchors.right: parent.right; anchors.rightMargin: 28
             anchors.bottom: parent.bottom; anchors.bottomMargin: 26
             spacing: 12
             ColumnLayout {
@@ -229,7 +212,7 @@ Rectangle {
                 LogosText {
                     Layout.maximumWidth: 520
                     wrapMode: Text.Wrap
-                    text: dive.job !== null && dive.job.state === "submitted" && dive.job.note ? dive.app.sentText(dive.job)
+                    text: dive.job !== null && dive.job.state === "submitted" ? dive.app.sentText(dive.job)
                         : dive.d && dive.d.job ? qsTr("Keep Bosphorus open. If you close it now, the dive stops before anything is sent; you can start it again from Activity.")
                         : qsTr("Keep Bosphorus open until it lands.")
                     textFormat: Text.PlainText
@@ -245,13 +228,14 @@ Rectangle {
                 text: dive.failed ? (dive.job === null ? dive.app.explain(dive.d.error)
                                      : dive.job.state === "interrupted" ? qsTr("Bosphorus stopped before this was sent: nothing moved. You can start it again from Activity.")
                                      : dive.job.error ? dive.app.explain(dive.job.error) : String(dive.job.note || qsTr("See Activity for what happened.")))
+                    : dive.d && dive.d.job && dive.app.wantsPositionTour ? qsTr("Sent and landed. You've borrowed and lent privately. Your position shows what you can do next.")
                     : (dive.d && dive.d.job ? qsTr("Sent and landed. It’s in your position now.") : qsTr("Sent and landed. It’s in the account now."))
             }
             Row {
                 visible: dive.finished
                 spacing: 10
                 Kit.BigButton { buttonHeight: 48; outline: true; text: qsTr("See in Activity"); onClicked: { if (dive.d && dive.d.job) dive.app.selectedJob = dive.d.job; dive.app.tab = 3; dive.app.dive = null } }
-                Kit.BigButton { buttonHeight: 48; text: dive.d && dive.d.job ? qsTr("Back to position") : qsTr("Back to wallet"); onClicked: { dive.app.tab = dive.d && dive.d.job ? 2 : 0; dive.app.dive = null } }
+                Kit.BigButton { objectName: "diveBack"; buttonHeight: 48; text: dive.d && dive.d.job ? (dive.app.wantsPositionTour ? qsTr("See your position") : qsTr("Back to position")) : qsTr("Back to wallet"); onClicked: { dive.app.tab = dive.d && dive.d.job ? 2 : 0; dive.app.dive = null } }
             }
         }
     }

@@ -14,7 +14,7 @@ var steps = [
       targets: [{ name: "addressChip", label: "Your address: click to copy", side: "above" },
                 { name: "rowActions", label: "Move ↓ makes it private · ⋯ to send", side: "left" }] },
     { tab: 0, title: "Below the surface",
-      body: "A dive moves tokens into your private account. Your computer proves it in a minute or two; the network sees something leave, not where it went.",
+      body: "A dive moves tokens into your private account. Your computer proves it in %1; the network sees something leave, not where it went.",
       targets: [{ name: "zoneBelow", label: "Private: only this computer can see it", side: "above" }] },
     { tab: 1, title: "Markets",
       body: "Each market lends one token against another. Lenders earn what borrowers pay.",
@@ -40,4 +40,20 @@ var steps = [
       body: "You've borrowed and lent below the surface. From here: pay back from Position, or dive tokens up and down on this screen.",
       targets: [{ name: "zoneBelow", label: "Your private money", side: "above" },
                 { name: "nav", label: "Position: pay back, add, take back", side: "below" }] }
+]
+
+// After the guided borrow and lend: the position they made, and what to do with it next.
+var position = [
+    { tab: 2, setup: "position", title: "Your position",
+      body: "What you lent and what you borrowed, side by side. Only this computer can see them.",
+      targets: [{ name: "positionLend", label: "What you lent: it earns interest", side: "above" },
+                { name: "positionBorrow", label: "Your WBTC and your loan", side: "above" }] },
+    { tab: 2, setup: "position", title: "Watch the water",
+      body: "The water is your loan against what you can borrow. It rises when WBTC falls or interest builds up. If it reaches the line, some WBTC is sold to pay back the loan.",
+      targets: [{ name: "sellLine", label: "Water here: some WBTC is sold", side: "below" }] },
+    { tab: 2, setup: "position", title: "What's next",
+      body: "Pay back the loan whenever you like, then take your WBTC back. Your lent USDC earns until you take it back. Each of these is private too.",
+      targets: [{ name: "op-repay", label: "Pay back the loan", side: "above" },
+                { name: "op-withdraw_collateral", label: "Then take your WBTC back", side: "above" },
+                { name: "op-withdraw", label: "Take back what you lent", side: "above" }] }
 ]

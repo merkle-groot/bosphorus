@@ -353,6 +353,7 @@ Item {
         // One click, one job: a second click before the first answers would do it twice.
         if (key === "" || key !== page.quotedKey || page.submitting) return
         var title = Tide.opText(page.op.op, (page.useAll ? qsTr("all") : Units.format(page.amount, page.decimals)) + " " + page.symbol, true)
+        var landed = Tide.opText(page.op.op, (page.useAll ? qsTr("all") : Units.format(page.amount, page.decimals)) + " " + page.symbol, "done")
         var seen = page.seenFromAbove(), who = page.app.accountName(page.account)
         var track = { op: page.op.op, symbol: page.symbol, loanSym: page.loanSym, loanDec: page.loanDec, collDec: page.collDec,
                       amountText: page.useAll ? qsTr("all") : Units.format(page.amount, page.decimals, 2),
@@ -367,20 +368,20 @@ Item {
             track.id = job.id
             page.tracking = track
             page.app.refreshJobs()
-            if (Units.isPrivate(req.owner)) page.app.dive = { job: job.id, title: title + qsTr(" · %1").arg(who), seen: seen }
+            if (Units.isPrivate(req.owner)) page.app.dive = { job: job.id, title: title + qsTr(" · %1").arg(who), doneTitle: landed + qsTr(" · %1").arg(who), seen: seen }
         }, function(e) { page.submitting = false; page.app.report(e) })
     }
 
-    // What stays visible after a private op ("Seen from above").
+    // What stays visible after a private op ("What everyone sees").
     function seenFromAbove() {
         var a = Units.format(page.amount, page.decimals) + " " + page.symbol
         switch (page.op.op) {
-        case "supply": return page.useHeld ? qsTr("%1 came into the market. New market totals. No position.").arg(a) : qsTr("Some position lent %1. New market totals.").arg(a)
-        case "withdraw": return page.useHeld ? qsTr("%1 left the market. New market totals. No position.").arg(a) : qsTr("Some position took back %1.").arg(a)
-        case "supply_collateral": return qsTr("Some position added %1 of collateral.").arg(a)
-        case "withdraw_collateral": return qsTr("Some position removed %1 of collateral.").arg(a)
+        case "supply": return page.useHeld ? qsTr("%1 came into the market. New market totals. No position.").arg(a) : qsTr("A position lent %1. New market totals.").arg(a)
+        case "withdraw": return page.useHeld ? qsTr("%1 left the market. New market totals. No position.").arg(a) : qsTr("A position took back %1.").arg(a)
+        case "supply_collateral": return qsTr("A position added %1 of collateral.").arg(a)
+        case "withdraw_collateral": return qsTr("A position removed %1 of collateral.").arg(a)
         case "borrow": return qsTr("Some account now owes %1 more. %1 left the market.").arg(a)
-        case "repay": return qsTr("Some position paid back %1.").arg(a)
+        case "repay": return qsTr("A position paid back %1.").arg(a)
         }
         return ""
     }

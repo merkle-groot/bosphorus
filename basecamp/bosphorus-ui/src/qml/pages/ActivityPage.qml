@@ -47,12 +47,12 @@ Item {
         var r = j.request || {}
         var a = page.amountOf(j)
         switch (r.op) {
-        case "supply": return r.held ? qsTr("%1 came into the market. New market totals. No position.").arg(a) : qsTr("Some position lent %1. New market totals.").arg(a)
-        case "withdraw": return r.held ? qsTr("Lent money left the market. New market totals. No position.") : qsTr("Some position took back what it lent.")
-        case "supply_collateral": return qsTr("Some position added %1 of collateral.").arg(a)
-        case "withdraw_collateral": return qsTr("Some position removed collateral.")
+        case "supply": return r.held ? qsTr("%1 came into the market. New market totals. No position.").arg(a) : qsTr("A position lent %1. New market totals.").arg(a)
+        case "withdraw": return r.held ? qsTr("Lent money left the market. New market totals. No position.") : qsTr("A position took back what it lent.")
+        case "supply_collateral": return qsTr("A position added %1 of collateral.").arg(a)
+        case "withdraw_collateral": return qsTr("A position removed collateral.")
         case "borrow": return qsTr("Some account now owes %1 more. %1 left the market.").arg(a)
-        case "repay": return qsTr("Some position paid back part of its debt.")
+        case "repay": return qsTr("A position paid back part of its debt.")
         }
         return qsTr("The market's totals change. Not who changed them.")
     }
@@ -83,7 +83,7 @@ Item {
         var i = app.info
         if (app.weather === "offline") return [qsTr("No connection."), qsTr("Bosphorus can’t reach the network. Nothing is lost: what was sent lands or not on its own, and Bosphorus picks up when the connection is back."), Tide.badTint, "#FFE0DC"]
         if (!i) return null
-        if (app.weather === "stalled") return [qsTr("The network is stalled."), qsTr("No new blocks for a few minutes. Anything sent waits until it moves again; don’t send it twice."), Tide.warnTint, "#FFEBC7"]
+        if (app.weather === "stalled") return [qsTr("The network is paused."), app.stalledText,Tide.warnTint, "#FFEBC7"]
         if (i.lending_problem) return [qsTr("Lending and borrowing are paused."), qsTr("The lending program isn’t the one Bosphorus expects. Your money is safe; new actions wait until it’s fixed."), Tide.badTint, "#FFE0DC"]
         if (i.privacy_circuit_problem) return [qsTr("Diving isn’t working right now."), qsTr("Something is wrong with the privacy system. Everyday accounts still work."), Tide.badTint, "#FFE0DC"]
         if (app.weather === "behind") return [qsTr("Catching up."), qsTr("Your private copy is %1 blocks behind. Private balances may be out of date until you Update.").arg(i.last_block - i.synced_block), Tide.infoTint, Tide.infoText]
@@ -223,7 +223,10 @@ Item {
                             visible: page.cur !== null && page.cur.state === "proving"
                             buttonHeight: 48; fontSize: 15
                             text: qsTr("Watch the dive")
-                            onClicked: page.app.dive = { job: page.cur.id, title: Tide.opText((page.cur.request || {}).op, page.amountOf(page.cur), true) + qsTr(" · %1").arg(page.app.accountName(page.cur.request.owner || page.cur.request.from)), seen: page.seenOf(page.cur) }
+                            onClicked: {
+                                var who = qsTr(" · %1").arg(page.app.accountName(page.cur.request.owner || page.cur.request.from)), op = (page.cur.request || {}).op
+                                page.app.dive = { job: page.cur.id, title: Tide.opText(op, page.amountOf(page.cur), true) + who, doneTitle: Tide.opText(op, page.amountOf(page.cur), "done") + who, seen: page.seenOf(page.cur) }
+                            }
                         }
                         Kit.BigButton {
                             visible: page.cur !== null && page.cur.state === "interrupted" && !page.retried(page.cur)

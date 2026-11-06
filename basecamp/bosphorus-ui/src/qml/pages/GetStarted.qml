@@ -43,7 +43,7 @@ Rectangle {
     readonly property var say: {
         var a = app
         if (next === "starter") {
-            if (claimingWbtc) return { title: qsTr("Getting your WBTC"), detail: qsTr("Your computer is proving the claim, so nobody learns it was you: %1. %2 so far.").arg(a.diveTime).arg(since(a.starterStarted || now)) }
+            if (claimingWbtc) return { title: qsTr("Getting your WBTC"), detail: qsTr("Your computer is proving the claim privately: %1. %2 so far.").arg(a.diveTime).arg(since(a.starterStarted || now)) }
             var wait = a.claimWait("WBTC")
             return { title: qsTr("Get some test WBTC"), detail: wait !== "" ? wait : qsTr("%1 WBTC, straight into your Private account. Free, and worth nothing.").arg(dropText(wbtc)),
                      button: qsTr("Get WBTC"), enabled: a.canClaim("WBTC"), act: function() { a.startStarter() } }

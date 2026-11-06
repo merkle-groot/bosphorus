@@ -66,12 +66,12 @@ function level(ratio, sellAt) {
 }
 
 var ops = [
-    { op: "supply", label: "Lend", act: "Lend %1", doing: "Lending %1", token: "loan", all: false },
-    { op: "withdraw", label: "Take back", act: "Take back %1", doing: "Taking back %1", token: "loan", all: true },
-    { op: "supply_collateral", label: "Add collateral", short: "Add", act: "Add %1 as collateral", doing: "Adding %1 as collateral", token: "collateral", all: false },
-    { op: "withdraw_collateral", label: "Remove collateral", short: "Remove", act: "Remove %1 of collateral", doing: "Removing %1 of collateral", token: "collateral", all: true },
-    { op: "borrow", label: "Borrow", act: "Borrow %1", doing: "Borrowing %1", token: "loan", all: false },
-    { op: "repay", label: "Pay back", act: "Pay back %1", doing: "Paying back %1", token: "loan", all: true }
+    { op: "supply", label: "Lend", act: "Lend %1", doing: "Lending %1", did: "Lent %1", token: "loan", all: false },
+    { op: "withdraw", label: "Take back", act: "Take back %1", doing: "Taking back %1", did: "Took back %1", token: "loan", all: true },
+    { op: "supply_collateral", label: "Add collateral", short: "Add", act: "Add %1 as collateral", doing: "Adding %1 as collateral", did: "Added %1 as collateral", token: "collateral", all: false },
+    { op: "withdraw_collateral", label: "Remove collateral", short: "Remove", act: "Remove %1 of collateral", doing: "Removing %1 of collateral", did: "Removed %1 of collateral", token: "collateral", all: true },
+    { op: "borrow", label: "Borrow", act: "Borrow %1", doing: "Borrowing %1", did: "Borrowed %1", token: "loan", all: false },
+    { op: "repay", label: "Pay back", act: "Pay back %1", doing: "Paying back %1", did: "Paid back %1", token: "loan", all: true }
 ]
 
 function opLabel(op) {
@@ -79,9 +79,10 @@ function opLabel(op) {
     return op
 }
 
-// The op as a phrase around `amount` ("Add 1 WBTC as collateral"); `ing` while it runs.
+// The op as a phrase around `amount` ("Add 1 WBTC as collateral"); `ing` while it runs, or
+// "done" once it has landed ("Added 1 WBTC as collateral").
 function opText(op, amount, ing) {
-    for (var i = 0; i < ops.length; i++) if (ops[i].op === op) return (ing ? ops[i].doing : ops[i].act).replace("%1", amount)
+    for (var i = 0; i < ops.length; i++) if (ops[i].op === op) return (ing === "done" ? ops[i].did : ing ? ops[i].doing : ops[i].act).replace("%1", amount)
     return op + " " + amount
 }
 
