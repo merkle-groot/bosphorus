@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "name": "bosphorus",
+  "displayName": "Bosphorus",
+  "description": "Private lending and borrowing on the Logos Execution Zone testnet.",
+  "homepage": "https://github.com/merkle-groot/bosphorus",
+  "indexUrl": "https://raw.githubusercontent.com/merkle-groot/bosphorus/main/basecamp/catalog/index.json",
+  "trustedSigners": []
+}

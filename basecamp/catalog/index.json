@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 2,
+  "repositoryName": "bosphorus",
+  "generatedAt": "2026-11-06T06:09:08Z",
+  "packages": [
+    {
+      "name": "bosphorus",
+      "versions": [
+        {
+          "releasedAt": "2026-11-06T06:09:00Z",
+          "publisherRef": "bosphorus-v0.2.0",
+          "url": "https://github.com/merkle-groot/bosphorus/releases/download/basecamp-v0.2.0/bosphorus-0.2.0.lgx",
+          "size": 81909968,
+          "sha256": "405bf88b8a5804f0c312db0667a148a1c9b25880b2e483a623053120944b183f",
+          "rootHash": "e8d258176579d1e5d76c4e8b88e449087c5e3e67ea6fcde72d159a13b1c27f9b",
+          "manifest": {
+            "author": "Bosphorus",
+            "category": "finance",
+            "dependencies": [],
+            "description": "Bosphorus lending on LEZ: isolated markets with private positions, proven on this machine's GPU. Keeps its own wallet.",
+            "display_name": "Bosphorus",
+            "hashes": {
+              "assets": "0cd85d38fef8b52f23237b9513dcd9f79dd8e52b814ee06ef147d462db9bae73",
+              "root": "e8d258176579d1e5d76c4e8b88e449087c5e3e67ea6fcde72d159a13b1c27f9b",
+              "variants": "eb4381e90fa0098b7284e50cc6c9e0d34d5c5b126eb7ecfc55dda7713eb7db30",
+              "variants/darwin-arm64": "a79ed653f07726254a63121e831ca5434c697c2808e7b431b07a022512b09705"
+            },
+            "icon": "",
+            "main": {
+              "darwin-arm64": "bosphorus_plugin.dylib"
+            },
+            "manifestVersion": "0.6.0",
+            "name": "bosphorus",
+            "type": "core",
+            "version": "0.2.0"
+          },
+          "urls": [
+            "https://github.com/merkle-groot/bosphorus/releases/download/basecamp-v0.2.0/bosphorus-0.2.0.lgx"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "bosphorus_ui",
+      "versions": [
+        {
+          "releasedAt": "2026-11-06T06:09:00Z",
+          "publisherRef": "bosphorus_ui-v0.2.0",
+          "url": "https://github.com/merkle-groot/bosphorus/releases/download/basecamp-v0.2.0/bosphorus_ui-0.2.0.lgx",
+          "size": 3691276,
+          "sha256": "46c56aaa9bcac1e4246713d47fb6fa446acf7429d8e512491ed701d49a780cf6",
+          "rootHash": "b5502894600e7606b595f8ee9eed6728baefb9fd0f7efa485e56722bf12385b0",
+          "manifest": {
+            "author": "Bosphorus",
+            "category": "finance",
+            "dependencies": [
+              "bosphorus"
+            ],
+            "description": "Lend and borrow on Bosphorus (LEZ), publicly or from private accounts, with its own wallet.",
+            "display_name": "Bosphorus",
+            "hashes": {
+              "assets": "52c2af74f1df0d188ccecf19385e30c2eb4563c66b7be3dc5603a9407ddb469e",
+              "root": "b5502894600e7606b595f8ee9eed6728baefb9fd0f7efa485e56722bf12385b0",
+              "variants": "f342a0719eff49b61f0b89de537abdc5fb1a0bcf6c809d0619ca97815733b261",
+              "variants/darwin-arm64": "cd5fbd728e8eb341700af009ffef25fa39412af7f979845f85db325ee5604610"
+            },
+            "icon": "assets/icon.png",
+            "main": {
+              "darwin-arm64": "bosphorus_ui_plugin.dylib"
+            },
+            "manifestVersion": "0.7.0",
+            "name": "bosphorus_ui",
+            "type": "ui_qml",
+            "version": "0.2.0",
+            "view": "qml/BosphorusView.qml"
+          },
+          "icon": {
+            "path": "icons/cd4cbc65cc0e7af4cc4aad1bd8548c8082d4a210161dfef7e3da9901db249647.png",
+            "sha256": "cd4cbc65cc0e7af4cc4aad1bd8548c8082d4a210161dfef7e3da9901db249647",
+            "size": 6039
+          },
+          "urls": [
+            "https://github.com/merkle-groot/bosphorus/releases/download/basecamp-v0.2.0/bosphorus_ui-0.2.0.lgx"
+          ]
+        }
+      ]
+    }
+  ]
+}
