@@ -36,7 +36,8 @@ package repository, and runs against the LEZ testnet. You need a Mac with Apple 
    https://raw.githubusercontent.com/merkle-groot/bosphorus/main/basecamp/catalog/logos-repo.json
    ```
 
-3. Open the app list, find **Bosphorus**, and click **Install**. Its core module comes with it.
+3. Go to **Applications** and pick the **Finance** category (or search for it). Click
+   **Bosphorus**, then **Install**. Its core module comes with it.
    The packages aren't signed yet, so Basecamp says it can't confirm who published them.
 4. Open Bosphorus and click **Create a wallet**. Write down the recovery words. While you do,
    your computer proves a claim for some free test WBTC, which lands in your private account.
